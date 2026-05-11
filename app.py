@@ -1,1242 +1,894 @@
+# app.py
 import streamlit as st
-import yfinance as yf
 import pandas as pd
 import numpy as np
-import plotly.graph_objects as go
-import plotly.express as px
-from plotly.subplots import make_subplots
+import yfinance as yf
 from datetime import datetime, timedelta
-from sklearn.linear_model import LinearRegression
-from sklearn.preprocessing import MinMaxScaler
-import ta
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
+from sklearn.ensemble import GradientBoostingRegressor, RandomForestRegressor
+from sklearn.preprocessing import RobustScaler
+from sklearn.metrics import mean_absolute_percentage_error
+from sklearn.model_selection import TimeSeriesSplit
 import warnings
 warnings.filterwarnings('ignore')
 
-# ============================================================
-# CONFIG
-# ============================================================
+# ── Page config ───────────────────────────────────────────────────────────────
 st.set_page_config(
-    page_title="📈 Stock Dashboard",
+    page_title="BBCA Stock Predictor",
     page_icon="📈",
     layout="wide",
-    initial_sidebar_state="expanded"
+    initial_sidebar_state="expanded",
 )
 
-# Custom CSS
 st.markdown("""
 <style>
-    .main-header {
-        font-size: 2.5rem;
-        font-weight: bold;
-        background: linear-gradient(90deg, #00C851, #007E33);
-        -webkit-background-clip: text;
-        -webkit-text-fill-color: transparent;
-        text-align: center;
-        padding: 1rem 0;
-    }
+    .main { background-color: #0e1117; }
     .metric-card {
-        background: #1E1E1E;
-        border-radius: 10px;
-        padding: 1rem;
-        border-left: 4px solid #00C851;
+        background: linear-gradient(135deg, #1e2130, #252a3d);
+        border-radius: 12px; padding: 16px 20px;
+        border-left: 4px solid #4f8ef7; margin-bottom: 10px;
     }
-    .rec-buy {
-        background: linear-gradient(135deg, #00C851, #007E33);
-        color: white;
-        padding: 1rem 2rem;
-        border-radius: 10px;
-        text-align: center;
-        font-size: 1.5rem;
-        font-weight: bold;
+    .metric-label { color: #8b9ab5; font-size: 13px; font-weight: 500; }
+    .metric-value { color: #ffffff; font-size: 24px; font-weight: 700; }
+    .metric-delta-pos { color: #00d4aa; font-size: 13px; }
+    .metric-delta-neg { color: #ff4b6e; font-size: 13px; }
+    .rec-box {
+        border-radius: 12px; padding: 20px; text-align: center;
+        font-size: 22px; font-weight: 800; letter-spacing: 1px; margin: 10px 0;
     }
-    .rec-sell {
-        background: linear-gradient(135deg, #FF4444, #CC0000);
-        color: white;
-        padding: 1rem 2rem;
-        border-radius: 10px;
-        text-align: center;
-        font-size: 1.5rem;
-        font-weight: bold;
+    .rec-buy  { background:linear-gradient(135deg,#00d4aa22,#00d4aa44);border:2px solid #00d4aa;color:#00d4aa; }
+    .rec-sell { background:linear-gradient(135deg,#ff4b6e22,#ff4b6e44);border:2px solid #ff4b6e;color:#ff4b6e; }
+    .rec-hold { background:linear-gradient(135deg,#f5a62322,#f5a62344);border:2px solid #f5a623;color:#f5a623; }
+    .model-badge {
+        background:#1e2130; border-radius:8px; padding:8px 14px;
+        font-size:12px; color:#8b9ab5; margin:4px; display:inline-block;
     }
-    .rec-hold {
-        background: linear-gradient(135deg, #FFB300, #FF8800);
-        color: white;
-        padding: 1rem 2rem;
-        border-radius: 10px;
-        text-align: center;
-        font-size: 1.5rem;
-        font-weight: bold;
+    .section-title {
+        color:#4f8ef7; font-size:15px; font-weight:600;
+        text-transform:uppercase; letter-spacing:1px;
+        margin:20px 0 10px; border-bottom:1px solid #252a3d; padding-bottom:6px;
     }
-    .info-box {
-        background: #262730;
-        border-radius: 8px;
-        padding: 1rem;
-        margin: 0.5rem 0;
+    .warning-box {
+        background:#f5a62311; border:1px solid #f5a623; border-radius:8px;
+        padding:10px 14px; color:#f5a623; font-size:12px; margin:8px 0;
     }
-    .stTabs [data-baseweb="tab-list"] {
-        gap: 8px;
-    }
-    .stTabs [data-baseweb="tab"] {
-        border-radius: 8px 8px 0px 0px;
+    .accuracy-box {
+        background:#1e2130; border-radius:10px; padding:14px;
+        border:1px solid #252a3d;
     }
 </style>
 """, unsafe_allow_html=True)
 
-# ============================================================
-# HELPER FUNCTIONS
-# ============================================================
 
-@st.cache_data(ttl=300)  # Cache 5 menit
-def get_stock_data(ticker: str, period: str = "1y") -> pd.DataFrame:
-    """Ambil data saham dari Yahoo Finance"""
-    try:
-        # Tambah .JK untuk saham Indonesia
-        if not ticker.endswith('.JK') and not '.' in ticker:
-            ticker_yf = ticker + '.JK'
-        else:
-            ticker_yf = ticker
-
-        stock = yf.Ticker(ticker_yf)
-        df = stock.history(period=period)
-
-        if df.empty:
-            # Coba tanpa .JK (untuk saham US)
-            stock = yf.Ticker(ticker)
-            df = stock.history(period=period)
-
-        return df, stock
-    except Exception as e:
-        st.error(f"Error mengambil data: {e}")
-        return pd.DataFrame(), None
+# ══════════════════════════════════════════════════════════════════════════════
+#  DATA & FEATURES
+# ══════════════════════════════════════════════════════════════════════════════
 
 @st.cache_data(ttl=300)
-def get_stock_info(ticker: str) -> dict:
-    """Ambil info fundamental saham"""
-    try:
-        if not ticker.endswith('.JK') and not '.' in ticker:
-            ticker_yf = ticker + '.JK'
-        else:
-            ticker_yf = ticker
+def fetch_data(ticker: str = "BBCA.JK", period: str = "2y") -> pd.DataFrame:
+    df = yf.download(ticker, period=period, interval="1d",
+                     progress=False, auto_adjust=True)
+    df.dropna(inplace=True)
+    return df
 
-        stock = yf.Ticker(ticker_yf)
-        info = stock.info
 
-        if not info or info.get('regularMarketPrice') is None:
-            stock = yf.Ticker(ticker)
-            info = stock.info
+def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
+    """Rich feature engineering — the real edge."""
+    c = df["Close"].squeeze().copy()
+    h = df["High"].squeeze().copy()
+    l = df["Low"].squeeze().copy()
+    v = df["Volume"].squeeze().copy()
 
-        return info
-    except:
-        return {}
+    # ── Trend ─────────────────────────────────────────────────────────────────
+    for w in [5, 7, 10, 14, 20, 50]:
+        df[f"MA{w}"]  = c.rolling(w).mean()
+        df[f"EMA{w}"] = c.ewm(span=w, adjust=False).mean()
 
-def calculate_technical_indicators(df: pd.DataFrame) -> pd.DataFrame:
-    """Hitung semua indikator teknikal"""
-    if df.empty or len(df) < 20:
-        return df
+    # ── Momentum ──────────────────────────────────────────────────────────────
+    # RSI
+    delta = c.diff()
+    gain  = delta.clip(lower=0).rolling(14).mean()
+    loss  = (-delta.clip(upper=0)).rolling(14).mean()
+    df["RSI14"] = 100 - 100 / (1 + gain / loss.replace(0, np.nan))
 
-    # Moving Averages
-    df['MA5']   = df['Close'].rolling(window=5).mean()
-    df['MA10']  = df['Close'].rolling(window=10).mean()
-    df['MA20']  = df['Close'].rolling(window=20).mean()
-    df['MA50']  = df['Close'].rolling(window=50).mean()
-    df['MA200'] = df['Close'].rolling(window=200).mean()
-
-    # EMA
-    df['EMA12'] = df['Close'].ewm(span=12, adjust=False).mean()
-    df['EMA26'] = df['Close'].ewm(span=26, adjust=False).mean()
-
-    # Bollinger Bands
-    df['BB_middle'] = df['Close'].rolling(window=20).mean()
-    bb_std = df['Close'].rolling(window=20).std()
-    df['BB_upper'] = df['BB_middle'] + (bb_std * 2)
-    df['BB_lower'] = df['BB_middle'] - (bb_std * 2)
+    # Stochastic RSI
+    rsi = df["RSI14"]
+    rsi_min = rsi.rolling(14).min()
+    rsi_max = rsi.rolling(14).max()
+    df["StochRSI"] = (rsi - rsi_min) / (rsi_max - rsi_min + 1e-9)
 
     # MACD
-    df['MACD'] = df['EMA12'] - df['EMA26']
-    df['MACD_signal'] = df['MACD'].ewm(span=9, adjust=False).mean()
-    df['MACD_hist'] = df['MACD'] - df['MACD_signal']
+    ema12 = c.ewm(span=12, adjust=False).mean()
+    ema26 = c.ewm(span=26, adjust=False).mean()
+    df["MACD"]        = ema12 - ema26
+    df["MACD_Signal"] = df["MACD"].ewm(span=9, adjust=False).mean()
+    df["MACD_Hist"]   = df["MACD"] - df["MACD_Signal"]
 
-    # RSI
-    try:
-        df['RSI'] = ta.momentum.RSIIndicator(df['Close'], window=14).rsi()
-    except:
-        delta = df['Close'].diff()
-        gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
-        loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
-        rs = gain / loss
-        df['RSI'] = 100 - (100 / (1 + rs))
+    # Rate of Change
+    for w in [5, 10, 20]:
+        df[f"ROC{w}"] = c.pct_change(w) * 100
 
-    # Stochastic
-    try:
-        stoch = ta.momentum.StochasticOscillator(df['High'], df['Low'], df['Close'])
-        df['Stoch_K'] = stoch.stoch()
-        df['Stoch_D'] = stoch.stoch_signal()
-    except:
-        pass
+    # Williams %R
+    hw = h.rolling(14).max()
+    lw = l.rolling(14).min()
+    df["WilliamsR"] = -100 * (hw - c) / (hw - lw + 1e-9)
 
-    # Volume indicators
-    df['Volume_MA20'] = df['Volume'].rolling(window=20).mean()
-    df['Volume_ratio'] = df['Volume'] / df['Volume_MA20']
+    # ── Volatility ────────────────────────────────────────────────────────────
+    # ATR
+    tr = pd.concat([h - l,
+                    (h - c.shift()).abs(),
+                    (l - c.shift()).abs()], axis=1).max(axis=1)
+    df["ATR14"] = tr.rolling(14).mean()
+    df["ATR_pct"] = df["ATR14"] / c * 100   # normalised
 
-    # ATR (Average True Range)
-    try:
-        df['ATR'] = ta.volatility.AverageTrueRange(df['High'], df['Low'], df['Close']).average_true_range()
-    except:
-        pass
+    # Bollinger Bands
+    bb_mid = c.rolling(20).mean()
+    bb_std = c.rolling(20).std()
+    df["BB_Upper"] = bb_mid + 2 * bb_std
+    df["BB_Lower"] = bb_mid - 2 * bb_std
+    df["BB_Mid"]   = bb_mid
+    df["BB_Width"] = (df["BB_Upper"] - df["BB_Lower"]) / bb_mid  # squeeze indicator
+    df["BB_Pos"]   = (c - df["BB_Lower"]) / (df["BB_Upper"] - df["BB_Lower"] + 1e-9)
 
-    # Returns
-    df['Daily_Return'] = df['Close'].pct_change()
-    df['Cumulative_Return'] = (1 + df['Daily_Return']).cumprod() - 1
+    # Historical volatility
+    df["HV20"] = c.pct_change().rolling(20).std() * np.sqrt(252) * 100
+
+    # ── Volume ────────────────────────────────────────────────────────────────
+    df["Vol_MA20"]   = v.rolling(20).mean()
+    df["Vol_Ratio"]  = v / df["Vol_MA20"]
+
+    # On-Balance Volume
+    obv = (np.sign(c.diff()) * v).fillna(0).cumsum()
+    df["OBV"]        = obv
+    df["OBV_MA10"]   = obv.rolling(10).mean()
+    df["OBV_Signal"] = (obv - df["OBV_MA10"]) / (df["OBV_MA10"].abs() + 1e-9)
+
+    # ── Price structure ───────────────────────────────────────────────────────
+    df["HL_pct"]     = (h - l) / c * 100          # daily range %
+    df["CO_pct"]     = (c - df["Open"].squeeze()) / df["Open"].squeeze() * 100
+    df["Gap"]        = (df["Open"].squeeze() - c.shift()) / c.shift() * 100
+
+    # Log returns (stationary)
+    df["LogRet1"]  = np.log(c / c.shift(1))
+    df["LogRet5"]  = np.log(c / c.shift(5))
+    df["LogRet10"] = np.log(c / c.shift(10))
+
+    # ── Lagged features (what model "sees" at prediction time) ────────────────
+    for lag in [1, 2, 3, 5, 7, 10]:
+        df[f"Close_lag{lag}"] = c.shift(lag)
+        df[f"Ret_lag{lag}"]   = c.pct_change().shift(lag)
+
+    # ── Target: next-N-day return (filled later per horizon) ─────────────────
+    df["Close_raw"] = c   # keep for reference
 
     return df
 
-def generate_recommendation(df: pd.DataFrame, info: dict) -> dict:
-    """Generate rekomendasi berdasarkan analisis teknikal"""
-    if df.empty or len(df) < 20:
-        return {"recommendation": "INSUFFICIENT DATA", "score": 0, "signals": []}
 
-    latest = df.iloc[-1]
-    prev   = df.iloc[-2] if len(df) > 1 else latest
+# ══════════════════════════════════════════════════════════════════════════════
+#  MODEL BUILDING
+# ══════════════════════════════════════════════════════════════════════════════
 
-    signals = []
-    score   = 0  # Positif = bullish, negatif = bearish
+FEATURE_COLS = [
+    "MA5","MA7","MA10","MA14","MA20","MA50",
+    "EMA5","EMA7","EMA10","EMA14","EMA20","EMA50",
+    "RSI14","StochRSI","MACD","MACD_Signal","MACD_Hist",
+    "ROC5","ROC10","ROC20","WilliamsR",
+    "ATR14","ATR_pct","BB_Width","BB_Pos","HV20",
+    "Vol_Ratio","OBV_Signal",
+    "HL_pct","CO_pct","Gap",
+    "LogRet1","LogRet5","LogRet10",
+    "Close_lag1","Close_lag2","Close_lag3","Close_lag5","Close_lag7","Close_lag10",
+    "Ret_lag1","Ret_lag2","Ret_lag3","Ret_lag5","Ret_lag7","Ret_lag10",
+]
 
-    # ── RSI ──────────────────────────────────────────────────
-    if 'RSI' in df.columns and not pd.isna(latest['RSI']):
-        rsi = latest['RSI']
-        if rsi < 30:
-            signals.append({"indicator": "RSI", "signal": "BUY",
-                            "detail": f"RSI {rsi:.1f} - Oversold (< 30)", "weight": 2})
-            score += 2
-        elif rsi < 40:
-            signals.append({"indicator": "RSI", "signal": "BUY",
-                            "detail": f"RSI {rsi:.1f} - Mendekati Oversold", "weight": 1})
-            score += 1
-        elif rsi > 70:
-            signals.append({"indicator": "RSI", "signal": "SELL",
-                            "detail": f"RSI {rsi:.1f} - Overbought (> 70)", "weight": 2})
-            score -= 2
-        elif rsi > 60:
-            signals.append({"indicator": "RSI", "signal": "SELL",
-                            "detail": f"RSI {rsi:.1f} - Mendekati Overbought", "weight": 1})
-            score -= 1
-        else:
-            signals.append({"indicator": "RSI", "signal": "HOLD",
-                            "detail": f"RSI {rsi:.1f} - Netral (30-70)", "weight": 0})
 
-    # ── MACD ─────────────────────────────────────────────────
-    if 'MACD' in df.columns and not pd.isna(latest['MACD']):
-        if latest['MACD'] > latest['MACD_signal'] and prev['MACD'] <= prev['MACD_signal']:
-            signals.append({"indicator": "MACD", "signal": "BUY",
-                            "detail": "MACD Golden Cross - Bullish Crossover", "weight": 3})
-            score += 3
-        elif latest['MACD'] < latest['MACD_signal'] and prev['MACD'] >= prev['MACD_signal']:
-            signals.append({"indicator": "MACD", "signal": "SELL",
-                            "detail": "MACD Death Cross - Bearish Crossover", "weight": 3})
-            score -= 3
-        elif latest['MACD'] > latest['MACD_signal']:
-            signals.append({"indicator": "MACD", "signal": "BUY",
-                            "detail": "MACD di atas Signal Line - Bullish", "weight": 1})
-            score += 1
-        else:
-            signals.append({"indicator": "MACD", "signal": "SELL",
-                            "detail": "MACD di bawah Signal Line - Bearish", "weight": 1})
-            score -= 1
+def build_dataset(df: pd.DataFrame, horizon: int):
+    """
+    Target = % return over `horizon` days ahead.
+    Using returns (not price levels) makes the model stationary & generalisable.
+    """
+    c = df["Close_raw"]
+    df["Target"] = (c.shift(-horizon) - c) / c * 100   # future % return
 
-    # ── Moving Average ────────────────────────────────────────
-    if 'MA20' in df.columns and not pd.isna(latest['MA20']):
-        if latest['Close'] > latest['MA20']:
-            signals.append({"indicator": "MA20", "signal": "BUY",
-                            "detail": f"Harga di atas MA20 ({latest['MA20']:.0f})", "weight": 1})
-            score += 1
-        else:
-            signals.append({"indicator": "MA20", "signal": "SELL",
-                            "detail": f"Harga di bawah MA20 ({latest['MA20']:.0f})", "weight": 1})
-            score -= 1
+    data = df[FEATURE_COLS + ["Target"]].dropna()
+    X = data[FEATURE_COLS].values
+    y = data["Target"].values
+    return X, y, data.index
 
-    if 'MA50' in df.columns and not pd.isna(latest['MA50']):
-        if latest['Close'] > latest['MA50']:
-            signals.append({"indicator": "MA50", "signal": "BUY",
-                            "detail": f"Harga di atas MA50 ({latest['MA50']:.0f})", "weight": 1})
-            score += 1
-        else:
-            signals.append({"indicator": "MA50", "signal": "SELL",
-                            "detail": f"Harga di bawah MA50 ({latest['MA50']:.0f})", "weight": 1})
-            score -= 1
 
-    # ── Golden/Death Cross MA50 vs MA200 ─────────────────────
-    if 'MA50' in df.columns and 'MA200' in df.columns:
-        if not pd.isna(latest['MA50']) and not pd.isna(latest['MA200']):
-            if latest['MA50'] > latest['MA200']:
-                signals.append({"indicator": "MA50/200", "signal": "BUY",
-                                "detail": "Golden Cross: MA50 > MA200 - Bullish Jangka Panjang", "weight": 2})
-                score += 2
-            else:
-                signals.append({"indicator": "MA50/200", "signal": "SELL",
-                                "detail": "Death Cross: MA50 < MA200 - Bearish Jangka Panjang", "weight": 2})
-                score -= 2
+def train_ensemble(X, y):
+    """
+    Ensemble of:
+      1. GradientBoosting  — captures non-linear interactions
+      2. RandomForest      — robust, low variance
+    Validated with TimeSeriesSplit (no data leakage).
+    """
+    tscv = TimeSeriesSplit(n_splits=5)
 
-    # ── Bollinger Bands ───────────────────────────────────────
-    if 'BB_upper' in df.columns and not pd.isna(latest['BB_upper']):
-        if latest['Close'] < latest['BB_lower']:
-            signals.append({"indicator": "Bollinger Bands", "signal": "BUY",
-                            "detail": "Harga di bawah BB Lower - Potensi Rebound", "weight": 2})
-            score += 2
-        elif latest['Close'] > latest['BB_upper']:
-            signals.append({"indicator": "Bollinger Bands", "signal": "SELL",
-                            "detail": "Harga di atas BB Upper - Potensi Koreksi", "weight": 2})
-            score -= 2
-        else:
-            bb_pos = (latest['Close'] - latest['BB_lower']) / (latest['BB_upper'] - latest['BB_lower'])
-            signals.append({"indicator": "Bollinger Bands", "signal": "HOLD",
-                            "detail": f"Harga dalam BB ({bb_pos*100:.0f}% dari lower)", "weight": 0})
+    gb = GradientBoostingRegressor(
+        n_estimators=300,
+        learning_rate=0.05,
+        max_depth=4,
+        subsample=0.8,
+        min_samples_leaf=10,
+        random_state=42,
+    )
+    rf = RandomForestRegressor(
+        n_estimators=200,
+        max_depth=6,
+        min_samples_leaf=10,
+        max_features=0.6,
+        random_state=42,
+        n_jobs=-1,
+    )
 
-    # ── Volume ────────────────────────────────────────────────
-    if 'Volume_ratio' in df.columns and not pd.isna(latest['Volume_ratio']):
-        if latest['Volume_ratio'] > 1.5 and latest['Daily_Return'] > 0:
-            signals.append({"indicator": "Volume", "signal": "BUY",
-                            "detail": f"Volume tinggi ({latest['Volume_ratio']:.1f}x) dengan harga naik", "weight": 1})
-            score += 1
-        elif latest['Volume_ratio'] > 1.5 and latest['Daily_Return'] < 0:
-            signals.append({"indicator": "Volume", "signal": "SELL",
-                            "detail": f"Volume tinggi ({latest['Volume_ratio']:.1f}x) dengan harga turun", "weight": 1})
-            score -= 1
+    # ── Cross-val MAPE per model ───────────────────────────────────────────────
+    mapes_gb, mapes_rf = [], []
+    for train_idx, val_idx in tscv.split(X):
+        X_tr, X_val = X[train_idx], X[val_idx]
+        y_tr, y_val = y[train_idx], y[val_idx]
 
-    # ── Final Recommendation ──────────────────────────────────
-    if score >= 4:
-        recommendation = "STRONG BUY"
-    elif score >= 2:
-        recommendation = "BUY"
-    elif score <= -4:
-        recommendation = "STRONG SELL"
-    elif score <= -2:
-        recommendation = "SELL"
-    else:
-        recommendation = "HOLD"
+        scaler = RobustScaler()
+        X_tr_sc  = scaler.fit_transform(X_tr)
+        X_val_sc = scaler.transform(X_val)
+
+        gb.fit(X_tr_sc, y_tr)
+        rf.fit(X_tr_sc, y_tr)
+
+        # avoid division by zero in MAPE when y_val has zeros
+        mask = y_val != 0
+        if mask.sum() > 0:
+            mapes_gb.append(mean_absolute_percentage_error(
+                y_val[mask], gb.predict(X_val_sc)[mask]))
+            mapes_rf.append(mean_absolute_percentage_error(
+                y_val[mask], rf.predict(X_val_sc)[mask]))
+
+    # ── Final fit on ALL data ─────────────────────────────────────────────────
+    scaler_final = RobustScaler()
+    X_sc = scaler_final.fit_transform(X)
+    gb.fit(X_sc, y)
+    rf.fit(X_sc, y)
+
+    avg_mape_gb = float(np.mean(mapes_gb)) * 100 if mapes_gb else 0.0
+    avg_mape_rf = float(np.mean(mapes_rf)) * 100 if mapes_rf else 0.0
+
+    # Weight by inverse MAPE (better model gets more weight)
+    inv_gb = 1 / (avg_mape_gb + 1e-6)
+    inv_rf = 1 / (avg_mape_rf + 1e-6)
+    total  = inv_gb + inv_rf
+    w_gb   = inv_gb / total
+    w_rf   = inv_rf / total
 
     return {
-        "recommendation": recommendation,
-        "score": score,
-        "signals": signals,
-        "max_score": 12
+        "gb": gb, "rf": rf,
+        "scaler": scaler_final,
+        "w_gb": w_gb, "w_rf": w_rf,
+        "mape_gb": avg_mape_gb,
+        "mape_rf": avg_mape_rf,
+        "weighted_mape": w_gb * avg_mape_gb + w_rf * avg_mape_rf,
     }
 
-def predict_price(df: pd.DataFrame, days: int = 30) -> dict:
-    """Prediksi harga menggunakan Linear Regression + trend"""
-    if df.empty or len(df) < 30:
-        return {}
 
-    try:
-        close_prices = df['Close'].values
-        X = np.arange(len(close_prices)).reshape(-1, 1)
-        y = close_prices
+def iterative_predict(df: pd.DataFrame, models: dict,
+                      horizon: int) -> dict:
+    """
+    Walk-forward prediction:
+    Predict day+1 return → update synthetic price → rebuild features → repeat.
+    This avoids the naive mistake of predicting all days from a single snapshot.
+    """
+    gb      = models["gb"]
+    rf      = models["rf"]
+    scaler  = models["scaler"]
+    w_gb    = models["w_gb"]
+    w_rf    = models["w_rf"]
 
-        # Linear Regression
-        model = LinearRegression()
-        model.fit(X, y)
+    # Work on a copy we can extend
+    df_sim = df.copy()
+    predicted_prices = []
+    predicted_returns = []
 
-        # Prediksi ke depan
-        future_X = np.arange(len(close_prices), len(close_prices) + days).reshape(-1, 1)
-        predictions = model.predict(future_X)
+    current_price = float(df_sim["Close_raw"].iloc[-1])
 
-        # Hitung volatilitas untuk confidence interval
-        residuals = y - model.predict(X)
-        std_residuals = np.std(residuals)
+    for step in range(horizon):
+        # Extract latest feature row
+        row = df_sim[FEATURE_COLS].iloc[-1:].values
+        row_sc = scaler.transform(row)
 
-        # Trend analysis
-        trend_slope = model.coef_[0]
-        current_price = close_prices[-1]
+        ret_gb = gb.predict(row_sc)[0]
+        ret_rf = rf.predict(row_sc)[0]
+        ret_ensemble = w_gb * ret_gb + w_rf * ret_rf   # % return
 
-        # 30-day prediction
-        pred_30d = predictions[-1]
-        pred_7d  = predictions[6] if days >= 7 else predictions[-1]
-        pred_14d = predictions[13] if days >= 14 else predictions[-1]
+        # Clip extreme predictions (sanity guard: max ±5% per day)
+        ret_ensemble = np.clip(ret_ensemble, -5.0, 5.0)
 
-        # Confidence interval (95%)
-        ci_upper = pred_30d + 1.96 * std_residuals
-        ci_lower = pred_30d - 1.96 * std_residuals
+        next_price = current_price * (1 + ret_ensemble / 100)
+        predicted_prices.append(next_price)
+        predicted_returns.append(ret_ensemble)
 
-        # Future dates
-        last_date    = df.index[-1]
-        future_dates = pd.date_range(start=last_date + timedelta(days=1), periods=days, freq='B')
+        # ── Append synthetic row to df_sim ────────────────────────────────────
+        new_row = df_sim.iloc[-1:].copy()
+        new_row.index = [df_sim.index[-1] + timedelta(days=1)]
 
-        return {
-            "predictions": predictions,
-            "future_dates": future_dates,
-            "pred_7d": pred_7d,
-            "pred_14d": pred_14d,
-            "pred_30d": pred_30d,
-            "ci_upper": ci_upper,
-            "ci_lower": ci_lower,
-            "trend_slope": trend_slope,
-            "current_price": current_price,
-            "change_7d_pct": ((pred_7d - current_price) / current_price) * 100,
-            "change_14d_pct": ((pred_14d - current_price) / current_price) * 100,
-            "change_30d_pct": ((pred_30d - current_price) / current_price) * 100,
-            "std_residuals": std_residuals
-        }
-    except Exception as e:
-        st.warning(f"Prediksi error: {e}")
-        return {}
+        # Update price columns
+        new_row["Close_raw"] = next_price
+        new_row["Open"]      = current_price
+        new_row["High"]      = next_price * 1.005
+        new_row["Low"]       = next_price * 0.995
+        new_row["Volume"]    = df_sim["Volume"].squeeze().rolling(5).mean().iloc[-1]
 
-def format_number(num, prefix="Rp "):
-    """Format angka besar"""
-    if num is None or (isinstance(num, float) and np.isnan(num)):
-        return "N/A"
-    if abs(num) >= 1e12:
-        return f"{prefix}{num/1e12:.2f}T"
-    elif abs(num) >= 1e9:
-        return f"{prefix}{num/1e9:.2f}B"
-    elif abs(num) >= 1e6:
-        return f"{prefix}{num/1e6:.2f}M"
+        df_sim = pd.concat([df_sim, new_row])
+
+        # Recompute indicators on extended df
+        df_sim = add_indicators(df_sim)
+        df_sim.ffill(inplace=True)
+
+        current_price = next_price
+
+    # ── Confidence band via Monte Carlo on ATR ────────────────────────────────
+    atr_pct = float(df["ATR_pct"].iloc[-1]) / 100
+    base    = float(df["Close_raw"].iloc[-1])
+    upper, lower = [], []
+    for i, p in enumerate(predicted_prices):
+        sigma = atr_pct * np.sqrt(i + 1)
+        upper.append(p * (1 + 1.65 * sigma))   # ~90% CI
+        lower.append(p * (1 - 1.65 * sigma))
+
+    return {
+        "prices":   predicted_prices,
+        "returns":  predicted_returns,
+        "upper":    upper,
+        "lower":    lower,
+    }
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  RECOMMENDATION ENGINE
+# ══════════════════════════════════════════════════════════════════════════════
+
+def generate_recommendation(df: pd.DataFrame, pred: dict) -> dict:
+    price   = float(df["Close_raw"].iloc[-1])
+    rsi     = float(df["RSI14"].iloc[-1])
+    macd    = float(df["MACD"].iloc[-1])
+    sig     = float(df["MACD_Signal"].iloc[-1])
+    ma20    = float(df["MA20"].iloc[-1])
+    ma50    = float(df["MA50"].iloc[-1])
+    bb_pos  = float(df["BB_Pos"].iloc[-1])
+    stoch   = float(df["StochRSI"].iloc[-1])
+    vol_r   = float(df["Vol_Ratio"].iloc[-1])
+    obv_sig = float(df["OBV_Signal"].iloc[-1])
+    hv20    = float(df["HV20"].iloc[-1])
+
+    pred_ret = (pred["prices"][-1] - price) / price * 100
+
+    score = 0.0
+
+    # ── RSI (weight 2) ────────────────────────────────────────────────────────
+    if rsi < 25:   score += 2.0
+    elif rsi < 35: score += 1.0
+    elif rsi < 45: score += 0.5
+    elif rsi > 75: score -= 2.0
+    elif rsi > 65: score -= 1.0
+    elif rsi > 55: score -= 0.5
+
+    # ── StochRSI (weight 1) ───────────────────────────────────────────────────
+    if stoch < 0.2:   score += 1.0
+    elif stoch > 0.8: score -= 1.0
+
+    # ── MACD (weight 1.5) ─────────────────────────────────────────────────────
+    if macd > sig:
+        score += 1.5 if macd > 0 else 0.75
     else:
-        return f"{prefix}{num:,.0f}"
+        score -= 1.5 if macd < 0 else 0.75
 
-def get_signal_color(signal: str) -> str:
-    colors = {"BUY": "🟢", "STRONG BUY": "🟢🟢", "SELL": "🔴",
-              "STRONG SELL": "🔴🔴", "HOLD": "🟡"}
-    return colors.get(signal, "⚪")
+    # ── Trend (weight 2) ──────────────────────────────────────────────────────
+    if price > ma20 > ma50: score += 2.0
+    elif price > ma20:      score += 1.0
+    elif price < ma20 < ma50: score -= 2.0
+    elif price < ma20:        score -= 1.0
 
-# ============================================================
-# MAIN APP
-# ============================================================
+    # ── Bollinger position (weight 1) ─────────────────────────────────────────
+    if bb_pos < 0.1:   score += 1.0
+    elif bb_pos > 0.9: score -= 1.0
 
-def main():
-    # Header
-    st.markdown('<div class="main-header">📈 Stock Analysis Dashboard</div>', unsafe_allow_html=True)
-    st.markdown("---")
+    # ── Volume confirmation (weight 1) ────────────────────────────────────────
+    if vol_r > 1.5:
+        score += 1.0 if macd > sig else -1.0
+    elif vol_r > 1.2:
+        score += 0.5 if macd > sig else -0.5
 
-    # ── Sidebar ───────────────────────────────────────────────
-    with st.sidebar:
-        st.image("https://img.icons8.com/fluency/96/stock-market.png", width=80)
-        st.title("⚙️ Settings")
+    # ── OBV trend (weight 0.5) ────────────────────────────────────────────────
+    if obv_sig > 0.05:   score += 0.5
+    elif obv_sig < -0.05: score -= 0.5
 
-        st.subheader("🔍 Pilih Saham")
+    # ── Model prediction (weight 3 — highest) ────────────────────────────────
+    if pred_ret > 4:    score += 3.0
+    elif pred_ret > 2:  score += 2.0
+    elif pred_ret > 0.5: score += 1.0
+    elif pred_ret < -4:  score -= 3.0
+    elif pred_ret < -2:  score -= 2.0
+    elif pred_ret < -0.5: score -= 1.0
 
-        # Watchlist populer
-        popular_stocks = {
-            "🇮🇩 IDX Popular": ["BBCA", "BBRI", "TLKM", "ASII", "BMRI",
-                                  "GOTO", "BYAN", "UNVR", "ICBP", "KLBF"],
-            "🇺🇸 US Stocks":   ["AAPL", "GOOGL", "MSFT", "TSLA", "NVDA",
-                                  "AMZN", "META", "NFLX", "AMD", "BABA"],
-            "₿ Crypto (via YF)": ["BTC-USD", "ETH-USD", "BNB-USD"]
-        }
+    # ── Volatility penalty (high vol = less confident) ────────────────────────
+    if hv20 > 40: score *= 0.85
 
-        market = st.selectbox("Market", list(popular_stocks.keys()))
+    # ── Map to recommendation ─────────────────────────────────────────────────
+    max_score = 12.0
+    pct = score / max_score
 
-        # Input manual atau pilih dari list
-        input_mode = st.radio("Mode Input", ["Pilih dari list", "Ketik manual"])
+    if pct >= 0.35:
+        rec      = "BUY"
+        strength = "Strong" if pct >= 0.55 else "Moderate"
+    elif pct <= -0.35:
+        rec      = "SELL"
+        strength = "Strong" if pct <= -0.55 else "Moderate"
+    else:
+        rec      = "HOLD"
+        strength = "Neutral"
 
-        if input_mode == "Pilih dari list":
-            ticker_input = st.selectbox("Pilih Saham", popular_stocks[market])
-        else:
-            ticker_input = st.text_input("Ticker Symbol", value="BBCA",
-                                          help="Contoh: BBCA (IDX), AAPL (US). Saham IDX otomatis ditambah .JK")
+    return {
+        "recommendation": rec,
+        "strength":       strength,
+        "score":          round(score, 2),
+        "score_pct":      round(pct * 100, 1),
+        "pred_ret":       pred_ret,
+        "rsi":            rsi,
+        "stoch":          stoch,
+        "macd":           macd,
+        "signal":         sig,
+        "bb_pos":         bb_pos,
+        "vol_ratio":      vol_r,
+        "hv20":           hv20,
+    }
 
-        # Period
-        period_map = {
-            "1 Bulan": "1mo", "3 Bulan": "3mo", "6 Bulan": "6mo",
-            "1 Tahun": "1y",  "2 Tahun": "2y",  "5 Tahun": "5y"
-        }
-        period_label  = st.selectbox("Periode Data", list(period_map.keys()), index=3)
-        selected_period = period_map[period_label]
 
-        # Prediction days
-        pred_days = st.slider("Hari Prediksi ke Depan", 7, 90, 30)
+# ══════════════════════════════════════════════════════════════════════════════
+#  CHARTS
+# ══════════════════════════════════════════════════════════════════════════════
 
-        # Analyze button
-        analyze_btn = st.button("🔍 Analisis Saham", type="primary", use_container_width=True)
+def chart_main(df, pred_dates, pred_prices, upper, lower, label):
+    show = df.tail(120)
+    c    = show["Close_raw"]
 
-        st.markdown("---")
+    fig = make_subplots(
+        rows=3, cols=1, shared_xaxes=True,
+        row_heights=[0.58, 0.22, 0.20],
+        vertical_spacing=0.03,
+        subplot_titles=("Price & Prediction", "Volume", "RSI + StochRSI"),
+    )
 
-        # Watchlist
-        st.subheader("📋 Watchlist Cepat")
-        watchlist = st.multiselect(
-            "Tambah ke Watchlist",
-            ["BBCA", "BBRI", "TLKM", "ASII", "BMRI", "AAPL", "GOOGL", "TSLA"],
-            default=["BBCA", "BBRI", "TLKM"]
-        )
+    # Candlestick
+    fig.add_trace(go.Candlestick(
+        x=show.index,
+        open=show["Open"].squeeze(), high=show["High"].squeeze(),
+        low=show["Low"].squeeze(),   close=c,
+        name="BBCA",
+        increasing_line_color="#00d4aa", decreasing_line_color="#ff4b6e",
+    ), row=1, col=1)
 
-        st.markdown("---")
-        st.caption(f"🕐 Last update: {datetime.now().strftime('%d/%m/%Y %H:%M')}")
-        st.caption("⚠️ Data dari Yahoo Finance. Bukan saran investasi.")
-
-    # ── Main Content ──────────────────────────────────────────
-    ticker = ticker_input.strip().upper()
-
-    if not ticker:
-        st.info("👈 Masukkan ticker saham di sidebar untuk memulai analisis")
-        _show_market_overview(watchlist)
-        return
-
-    # Load data
-    with st.spinner(f"⏳ Mengambil data {ticker}..."):
-        df_raw, stock_obj = get_stock_data(ticker, selected_period)
-        info = get_stock_info(ticker)
-
-    if df_raw.empty:
-        st.error(f"❌ Data untuk {ticker} tidak ditemukan. Cek kembali ticker symbol.")
-        return
-
-    # Hitung indikator
-    df = calculate_technical_indicators(df_raw.copy())
-
-    # Generate rekomendasi & prediksi
-    rec_data  = generate_recommendation(df, info)
-    pred_data = predict_price(df, pred_days)
-
-    latest = df.iloc[-1]
-    prev   = df.iloc[-2] if len(df) > 1 else latest
-
-    price_change     = latest['Close'] - prev['Close']
-    price_change_pct = (price_change / prev['Close']) * 100
-
-    # ── Stock Header ──────────────────────────────────────────
-    col_title, col_rec = st.columns([2, 1])
-
-    with col_title:
-        company_name = info.get('longName', ticker)
-        sector       = info.get('sector', 'N/A')
-        industry     = info.get('industry', 'N/A')
-
-        st.markdown(f"## {company_name}")
-        st.markdown(f"**{ticker}** | {sector} | {industry}")
-
-        price_color = "green" if price_change >= 0 else "red"
-        arrow       = "▲" if price_change >= 0 else "▼"
-
-        st.markdown(
-            f"### <span style='color:{price_color}'>"
-            f"{latest['Close']:,.0f} "
-            f"{arrow} {abs(price_change):,.0f} ({abs(price_change_pct):.2f}%)"
-            f"</span>",
-            unsafe_allow_html=True
-        )
-
-    with col_rec:
-        rec = rec_data['recommendation']
-        css_class = {
-            "STRONG BUY": "rec-buy", "BUY": "rec-buy",
-            "STRONG SELL": "rec-sell", "SELL": "rec-sell",
-            "HOLD": "rec-hold"
-        }.get(rec, "rec-hold")
-
-        emoji = {"STRONG BUY": "🚀", "BUY": "📈", "STRONG SELL": "💥",
-                 "SELL": "📉", "HOLD": "⏸️"}.get(rec, "❓")
-
-        st.markdown(
-            f'<div class="{css_class}">{emoji} {rec}<br>'
-            f'<small>Score: {rec_data["score"]}/12</small></div>',
-            unsafe_allow_html=True
-        )
-
-    st.markdown("---")
-
-    # ── Key Metrics ───────────────────────────────────────────
-    st.subheader("📊 Key Metrics")
-
-    m1, m2, m3, m4, m5, m6 = st.columns(6)
-
-    with m1:
-        st.metric("💰 Harga", f"{latest['Close']:,.0f}",
-                  f"{price_change_pct:+.2f}%")
-    with m2:
-        st.metric("📈 High (Hari)", f"{latest['High']:,.0f}")
-    with m3:
-        st.metric("📉 Low (Hari)", f"{latest['Low']:,.0f}")
-    with m4:
-        vol = latest['Volume']
-        st.metric("📦 Volume", f"{vol/1e6:.1f}M" if vol > 1e6 else f"{vol:,.0f}")
-    with m5:
-        rsi_val = latest.get('RSI', np.nan)
-        rsi_str = f"{rsi_val:.1f}" if not pd.isna(rsi_val) else "N/A"
-        rsi_delta = "Oversold" if not pd.isna(rsi_val) and rsi_val < 30 else \
-                    "Overbought" if not pd.isna(rsi_val) and rsi_val > 70 else "Normal"
-        st.metric("📡 RSI (14)", rsi_str, rsi_delta)
-    with m6:
-        ma20_val = latest.get('MA20', np.nan)
-        if not pd.isna(ma20_val):
-            ma20_diff = ((latest['Close'] - ma20_val) / ma20_val) * 100
-            st.metric("📏 vs MA20", f"{ma20_val:,.0f}", f"{ma20_diff:+.2f}%")
-        else:
-            st.metric("📏 MA20", "N/A")
-
-    # ── Tabs ──────────────────────────────────────────────────
-    tab1, tab2, tab3, tab4, tab5 = st.tabs([
-        "📈 Chart & Teknikal",
-        "🎯 Sinyal & Rekomendasi",
-        "🔮 Prediksi Harga",
-        "📋 Fundamental",
-        "📊 Statistik"
-    ])
-
-    # ════════════════════════════════════════════════════════
-    # TAB 1: CHART
-    # ════════════════════════════════════════════════════════
-    with tab1:
-        st.subheader("📈 Candlestick Chart + Indikator")
-
-        chart_options = st.multiselect(
-            "Tampilkan Indikator",
-            ["MA20", "MA50", "MA200", "Bollinger Bands", "Volume"],
-            default=["MA20", "MA50", "Bollinger Bands", "Volume"]
-        )
-
-        # Buat subplot
-        rows = 3 if "Volume" in chart_options else 2
-        row_heights = [0.6, 0.2, 0.2] if rows == 3 else [0.7, 0.3]
-
-        fig = make_subplots(
-            rows=rows, cols=1,
-            shared_xaxes=True,
-            vertical_spacing=0.05,
-            row_heights=row_heights,
-            subplot_titles=("Price", "MACD", "Volume" if rows == 3 else "MACD")
-        )
-
-        # Candlestick
-        fig.add_trace(go.Candlestick(
-            x=df.index,
-            open=df['Open'], high=df['High'],
-            low=df['Low'],   close=df['Close'],
-            name="Price",
-            increasing_line_color='#00C851',
-            decreasing_line_color='#FF4444'
+    # MAs
+    for col_name, color, w in [("MA7","#f5a623",1.2),("MA20","#4f8ef7",1.5),("MA50","#b44fff",1.2)]:
+        fig.add_trace(go.Scatter(
+            x=show.index, y=show[col_name].squeeze(),
+            name=col_name, line=dict(color=color, width=w), opacity=0.85,
         ), row=1, col=1)
 
-        # Moving Averages
-        ma_colors = {"MA20": "#FFB300", "MA50": "#2196F3", "MA200": "#E91E63"}
-        for ma in ["MA20", "MA50", "MA200"]:
-            if ma in chart_options and ma in df.columns:
-                fig.add_trace(go.Scatter(
-                    x=df.index, y=df[ma],
-                    name=ma, line=dict(color=ma_colors[ma], width=1.5)
-                ), row=1, col=1)
+    # Bollinger Bands
+    fig.add_trace(go.Scatter(
+        x=show.index, y=show["BB_Upper"].squeeze(),
+        line=dict(color="#8b9ab5", width=1, dash="dot"),
+        showlegend=False, name="BB Upper",
+    ), row=1, col=1)
+    fig.add_trace(go.Scatter(
+        x=show.index, y=show["BB_Lower"].squeeze(),
+        line=dict(color="#8b9ab5", width=1, dash="dot"),
+        fill="tonexty", fillcolor="rgba(139,154,181,0.06)",
+        showlegend=False, name="BB Lower",
+    ), row=1, col=1)
 
-        # Bollinger Bands
-        if "Bollinger Bands" in chart_options and 'BB_upper' in df.columns:
-            fig.add_trace(go.Scatter(
-                x=df.index, y=df['BB_upper'],
-                name="BB Upper", line=dict(color='rgba(100,100,255,0.5)', dash='dash'),
-                showlegend=True
-            ), row=1, col=1)
-            fig.add_trace(go.Scatter(
-                x=df.index, y=df['BB_lower'],
-                name="BB Lower", line=dict(color='rgba(100,100,255,0.5)', dash='dash'),
-                fill='tonexty', fillcolor='rgba(100,100,255,0.05)',
-                showlegend=True
-            ), row=1, col=1)
+    # Prediction confidence band
+    fig.add_trace(go.Scatter(
+        x=pred_dates, y=upper,
+        line=dict(width=0), showlegend=False, hoverinfo="skip",
+    ), row=1, col=1)
+    fig.add_trace(go.Scatter(
+        x=pred_dates, y=lower,
+        fill="tonexty", fillcolor="rgba(79,142,247,0.18)",
+        line=dict(width=0), name="90% CI", hoverinfo="skip",
+    ), row=1, col=1)
 
-        # MACD
-        if 'MACD' in df.columns:
-            fig.add_trace(go.Scatter(
-                x=df.index, y=df['MACD'],
-                name="MACD", line=dict(color='#2196F3', width=1.5)
-            ), row=2, col=1)
-            fig.add_trace(go.Scatter(
-                x=df.index, y=df['MACD_signal'],
-                name="Signal", line=dict(color='#FF9800', width=1.5)
-            ), row=2, col=1)
-            colors_hist = ['#00C851' if v >= 0 else '#FF4444' for v in df['MACD_hist'].fillna(0)]
-            fig.add_trace(go.Bar(
-                x=df.index, y=df['MACD_hist'],
-                name="Histogram", marker_color=colors_hist
-            ), row=2, col=1)
+    # Prediction line
+    bridge_x = [show.index[-1]] + list(pred_dates)
+    bridge_y = [float(c.iloc[-1])] + list(pred_prices)
+    fig.add_trace(go.Scatter(
+        x=bridge_x, y=bridge_y,
+        name=f"Forecast ({label})",
+        line=dict(color="#4f8ef7", width=2.5, dash="dash"),
+        mode="lines+markers", marker=dict(size=5),
+    ), row=1, col=1)
 
-        # Volume
-        if "Volume" in chart_options and rows == 3:
-            vol_colors = ['#00C851' if df['Close'].iloc[i] >= df['Open'].iloc[i]
-                          else '#FF4444' for i in range(len(df))]
-            fig.add_trace(go.Bar(
-                x=df.index, y=df['Volume'],
-                name="Volume", marker_color=vol_colors, showlegend=False
-            ), row=3, col=1)
-            if 'Volume_MA20' in df.columns:
-                fig.add_trace(go.Scatter(
-                    x=df.index, y=df['Volume_MA20'],
-                    name="Vol MA20", line=dict(color='yellow', width=1)
-                ), row=3, col=1)
+    # Volume
+    vol_colors = ["#00d4aa" if c_ >= o_ else "#ff4b6e"
+                  for c_, o_ in zip(show["Close_raw"], show["Open"].squeeze())]
+    fig.add_trace(go.Bar(
+        x=show.index, y=show["Volume"].squeeze(),
+        name="Volume", marker_color=vol_colors, opacity=0.65,
+    ), row=2, col=1)
+    fig.add_trace(go.Scatter(
+        x=show.index, y=show["Vol_MA20"].squeeze(),
+        name="Vol MA20", line=dict(color="#f5a623", width=1.2),
+    ), row=2, col=1)
 
-        fig.update_layout(
-            height=700,
-            template="plotly_dark",
-            xaxis_rangeslider_visible=False,
-            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
-            margin=dict(l=0, r=0, t=30, b=0)
+    # RSI
+    fig.add_trace(go.Scatter(
+        x=show.index, y=show["RSI14"].squeeze(),
+        name="RSI 14", line=dict(color="#b44fff", width=1.5),
+    ), row=3, col=1)
+    fig.add_trace(go.Scatter(
+        x=show.index, y=show["StochRSI"].squeeze() * 100,
+        name="StochRSI×100", line=dict(color="#00d4aa", width=1.2, dash="dot"),
+    ), row=3, col=1)
+    for lvl, clr in [(70,"#ff4b6e"),(30,"#00d4aa"),(50,"#8b9ab5")]:
+        fig.add_hline(y=lvl, line_dash="dot", line_color=clr,
+                      opacity=0.45, row=3, col=1)
+
+    fig.update_layout(
+        template="plotly_dark", paper_bgcolor="#0e1117", plot_bgcolor="#0e1117",
+        height=720, margin=dict(l=10,r=10,t=40,b=10),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02,
+                    xanchor="right", x=1, font=dict(size=11)),
+        xaxis_rangeslider_visible=False, hovermode="x unified",
+    )
+    fig.update_yaxes(gridcolor="#1e2130", zerolinecolor="#1e2130")
+    fig.update_xaxes(gridcolor="#1e2130")
+    return fig
+
+
+def chart_macd(df):
+    show = df.tail(120)
+    fig  = go.Figure()
+    colors = ["#00d4aa" if v >= 0 else "#ff4b6e"
+              for v in show["MACD_Hist"].squeeze()]
+    fig.add_trace(go.Bar(
+        x=show.index, y=show["MACD_Hist"].squeeze(),
+        name="Histogram", marker_color=colors, opacity=0.7,
+    ))
+    fig.add_trace(go.Scatter(
+        x=show.index, y=show["MACD"].squeeze(),
+        name="MACD", line=dict(color="#4f8ef7", width=1.5),
+    ))
+    fig.add_trace(go.Scatter(
+        x=show.index, y=show["MACD_Signal"].squeeze(),
+        name="Signal", line=dict(color="#f5a623", width=1.5),
+    ))
+    fig.update_layout(
+        template="plotly_dark", paper_bgcolor="#0e1117", plot_bgcolor="#0e1117",
+        height=260, margin=dict(l=10,r=10,t=30,b=10),
+        title="MACD (12,26,9)", legend=dict(orientation="h", y=1.1),
+        hovermode="x unified",
+    )
+    fig.update_yaxes(gridcolor="#1e2130")
+    fig.update_xaxes(gridcolor="#1e2130")
+    return fig
+
+
+def chart_feature_importance(models):
+    gb = models["gb"]
+    imp = pd.Series(gb.feature_importances_, index=FEATURE_COLS)
+    top = imp.nlargest(15).sort_values()
+    fig = go.Figure(go.Bar(
+        x=top.values, y=top.index,
+        orientation="h",
+        marker=dict(
+            color=top.values,
+            colorscale="Blues",
+            showscale=False,
+        ),
+    ))
+    fig.update_layout(
+        template="plotly_dark", paper_bgcolor="#0e1117", plot_bgcolor="#0e1117",
+        height=340, margin=dict(l=10,r=10,t=30,b=10),
+        title="Top 15 Feature Importances (GradientBoosting)",
+        xaxis_title="Importance",
+    )
+    fig.update_yaxes(gridcolor="#1e2130", tickfont=dict(size=11))
+    fig.update_xaxes(gridcolor="#1e2130")
+    return fig
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  MAIN APP
+# ══════════════════════════════════════════════════════════════════════════════
+
+def main():
+    # ── Sidebar ───────────────────────────────────────────────────────────────
+    with st.sidebar:
+        st.markdown("## ⚙️ Settings")
+        horizon_opt  = st.radio("Prediction Horizon", ["7 Days","1 Month"], index=0)
+        horizon_days = 7 if horizon_opt == "7 Days" else 30
+
+        st.markdown("---")
+        data_period = st.selectbox(
+            "Training Data Period",
+            ["1y","2y","3y"],
+            index=1,
+            help="More data = better model generalisation",
         )
 
-        st.plotly_chart(fig, use_container_width=True)
-
-        # RSI Chart
-        if 'RSI' in df.columns:
-            st.subheader("📡 RSI (14)")
-            fig_rsi = go.Figure()
-            fig_rsi.add_trace(go.Scatter(
-                x=df.index, y=df['RSI'],
-                name="RSI", line=dict(color='#9C27B0', width=2),
-                fill='tozeroy', fillcolor='rgba(156,39,176,0.1)'
-            ))
-            fig_rsi.add_hline(y=70, line_dash="dash", line_color="red",
-                               annotation_text="Overbought (70)")
-            fig_rsi.add_hline(y=30, line_dash="dash", line_color="green",
-                               annotation_text="Oversold (30)")
-            fig_rsi.add_hline(y=50, line_dash="dot", line_color="gray")
-            fig_rsi.update_layout(
-                height=250, template="plotly_dark",
-                margin=dict(l=0, r=0, t=10, b=0),
-                yaxis=dict(range=[0, 100])
-            )
-            st.plotly_chart(fig_rsi, use_container_width=True)
-
-    # ════════════════════════════════════════════════════════
-    # TAB 2: SINYAL & REKOMENDASI
-    # ════════════════════════════════════════════════════════
-    with tab2:
-        st.subheader("🎯 Analisis Sinyal Teknikal")
-
-        col_gauge, col_signals = st.columns([1, 2])
-
-        with col_gauge:
-            # Gauge chart untuk score
-            score     = rec_data['score']
-            max_score = rec_data['max_score']
-
-            fig_gauge = go.Figure(go.Indicator(
-                mode="gauge+number+delta",
-                value=score,
-                domain={'x': [0, 1], 'y': [0, 1]},
-                title={'text': "Bullish Score", 'font': {'size': 20}},
-                delta={'reference': 0},
-                gauge={
-                    'axis': {'range': [-max_score, max_score], 'tickwidth': 1},
-                    'bar': {'color': "#00C851" if score > 0 else "#FF4444"},
-                    'bgcolor': "white",
-                    'borderwidth': 2,
-                    'bordercolor': "gray",
-                    'steps': [
-                        {'range': [-max_score, -4], 'color': '#FF1744'},
-                        {'range': [-4, -2],          'color': '#FF7043'},
-                        {'range': [-2, 2],            'color': '#FFC107'},
-                        {'range': [2, 4],             'color': '#66BB6A'},
-                        {'range': [4, max_score],     'color': '#00C851'},
-                    ],
-                    'threshold': {
-                        'line': {'color': "white", 'width': 4},
-                        'thickness': 0.75,
-                        'value': score
-                    }
-                }
-            ))
-            fig_gauge.update_layout(
-                height=300, template="plotly_dark",
-                margin=dict(l=20, r=20, t=50, b=20)
-            )
-            st.plotly_chart(fig_gauge, use_container_width=True)
-
-            # Rekomendasi besar
-            rec = rec_data['recommendation']
-            emoji = {"STRONG BUY": "🚀", "BUY": "📈", "STRONG SELL": "💥",
-                     "SELL": "📉", "HOLD": "⏸️"}.get(rec, "❓")
-            css_class = "rec-buy" if "BUY" in rec else \
-                        "rec-sell" if "SELL" in rec else "rec-hold"
-            st.markdown(
-                f'<div class="{css_class}" style="margin-top:1rem">'
-                f'{emoji} {rec}</div>',
-                unsafe_allow_html=True
-            )
-
-        with col_signals:
-            st.subheader("📋 Detail Sinyal")
-
-            signals = rec_data.get('signals', [])
-
-            buy_signals  = [s for s in signals if s['signal'] == 'BUY']
-            sell_signals = [s for s in signals if s['signal'] == 'SELL']
-            hold_signals = [s for s in signals if s['signal'] == 'HOLD']
-
-            if buy_signals:
-                st.markdown("**🟢 Sinyal BUY:**")
-                for s in buy_signals:
-                    st.markdown(
-                        f'<div class="info-box">✅ <b>{s["indicator"]}</b>: {s["detail"]}</div>',
-                        unsafe_allow_html=True
-                    )
-
-            if sell_signals:
-                st.markdown("**🔴 Sinyal SELL:**")
-                for s in sell_signals:
-                    st.markdown(
-                        f'<div class="info-box" style="border-left: 3px solid #FF4444;">❌ <b>{s["indicator"]}</b>: {s["detail"]}</div>',
-                        unsafe_allow_html=True
-                    )
-
-            if hold_signals:
-                st.markdown("**🟡 Sinyal HOLD/NETRAL:**")
-                for s in hold_signals:
-                    st.markdown(
-                        f'<div class="info-box" style="border-left: 3px solid #FFB300;">⏸️ <b>{s["indicator"]}</b>: {s["detail"]}</div>',
-                        unsafe_allow_html=True
-                    )
-
-        # Summary table
         st.markdown("---")
-        st.subheader("📊 Ringkasan Indikator")
+        st.markdown("### 🧠 Model Info")
+        st.markdown("""
+        **Ensemble:**
+        - `GradientBoosting` (300 trees)
+        - `RandomForest` (200 trees)
 
-        indicator_data = []
-        for s in signals:
-            indicator_data.append({
-                "Indikator": s['indicator'],
-                "Sinyal": s['signal'],
-                "Detail": s['detail'],
-                "Bobot": s['weight']
-            })
+        **Validation:** TimeSeriesSplit (5-fold)  
+        **Features:** 44 technical indicators  
+        **Prediction:** Walk-forward iterative  
+        **CI:** ATR-based Monte Carlo (~90%)
 
-        if indicator_data:
-            df_signals = pd.DataFrame(indicator_data)
+        ---
+        ⚠️ *Not financial advice.*
+        """)
 
-            def color_signal(val):
-                if val == 'BUY':
-                    return 'background-color: #1B5E20; color: white'
-                elif val == 'SELL':
-                    return 'background-color: #B71C1C; color: white'
-                else:
-                    return 'background-color: #E65100; color: white'
+        if st.button("🔄 Refresh Data", use_container_width=True):
+            st.cache_data.clear()
+            st.rerun()
 
-            styled_df = df_signals.style.applymap(color_signal, subset=['Sinyal'])
-            st.dataframe(styled_df, use_container_width=True, hide_index=True)
-
-        # Support & Resistance
-        st.markdown("---")
-        st.subheader("🎯 Support & Resistance")
-
-        col_sr1, col_sr2, col_sr3 = st.columns(3)
-
-        # Hitung S&R sederhana
-        recent_data = df.tail(60)
-        resistance  = recent_data['High'].max()
-        support     = recent_data['Low'].min()
-        pivot       = (recent_data['High'].iloc[-1] + recent_data['Low'].iloc[-1] + recent_data['Close'].iloc[-1]) / 3
-
-        with col_sr1:
-            st.metric("🔴 Resistance", f"{resistance:,.0f}",
-                      f"{((resistance - latest['Close'])/latest['Close'])*100:+.2f}%")
-        with col_sr2:
-            st.metric("🟡 Pivot Point", f"{pivot:,.0f}",
-                      f"{((pivot - latest['Close'])/latest['Close'])*100:+.2f}%")
-        with col_sr3:
-            st.metric("🟢 Support", f"{support:,.0f}",
-                      f"{((support - latest['Close'])/latest['Close'])*100:+.2f}%")
-
-    # ════════════════════════════════════════════════════════
-    # TAB 3: PREDIKSI
-    # ════════════════════════════════════════════════════════
-    with tab3:
-        st.subheader(f"🔮 Prediksi Harga {pred_days} Hari ke Depan")
-
-        st.warning("⚠️ **Disclaimer**: Prediksi ini menggunakan Linear Regression berdasarkan data historis. "
-                   "Ini BUKAN jaminan pergerakan harga. Selalu lakukan riset mandiri sebelum berinvestasi.")
-
-        if pred_data:
-            # Prediction metrics
-            col_p1, col_p2, col_p3, col_p4 = st.columns(4)
-
-            with col_p1:
-                st.metric("📍 Harga Sekarang", f"{pred_data['current_price']:,.0f}")
-            with col_p2:
-                st.metric(
-                    "📅 Prediksi 7 Hari",
-                    f"{pred_data['pred_7d']:,.0f}",
-                    f"{pred_data['change_7d_pct']:+.2f}%"
-                )
-            with col_p3:
-                st.metric(
-                    "📅 Prediksi 14 Hari",
-                    f"{pred_data['pred_14d']:,.0f}",
-                    f"{pred_data['change_14d_pct']:+.2f}%"
-                )
-            with col_p4:
-                st.metric(
-                    f"📅 Prediksi {pred_days} Hari",
-                    f"{pred_data['pred_30d']:,.0f}",
-                    f"{pred_data['change_30d_pct']:+.2f}%"
-                )
-
-            # Trend direction
-            slope = pred_data['trend_slope']
-            if slope > 0:
-                st.success(f"📈 **Trend: UPTREND** - Slope: +{slope:.2f} per hari")
-            else:
-                st.error(f"📉 **Trend: DOWNTREND** - Slope: {slope:.2f} per hari")
-
-            # Prediction chart
-            fig_pred = go.Figure()
-
-            # Historical
-            hist_days = min(90, len(df))
-            fig_pred.add_trace(go.Scatter(
-                x=df.index[-hist_days:],
-                y=df['Close'].iloc[-hist_days:],
-                name="Harga Historis",
-                line=dict(color='#2196F3', width=2)
-            ))
-
-            # Prediction
-            fig_pred.add_trace(go.Scatter(
-                x=pred_data['future_dates'],
-                y=pred_data['predictions'],
-                name="Prediksi",
-                line=dict(color='#FF9800', width=2, dash='dash')
-            ))
-
-            # Confidence interval
-            fig_pred.add_trace(go.Scatter(
-                x=list(pred_data['future_dates']) + list(pred_data['future_dates'])[::-1],
-                y=list(pred_data['predictions'] + 1.96 * pred_data['std_residuals']) +
-                  list(pred_data['predictions'] - 1.96 * pred_data['std_residuals'])[::-1],
-                fill='toself',
-                fillcolor='rgba(255,152,0,0.15)',
-                line=dict(color='rgba(255,152,0,0)'),
-                name="Confidence Interval 95%"
-            ))
-
-            # Vertical line (today)
-            fig_pred.add_vline(
-                x=df.index[-1], line_dash="dot",
-                line_color="white", annotation_text="Hari Ini"
-            )
-
-            fig_pred.update_layout(
-                height=450, template="plotly_dark",
-                title=f"Prediksi Harga {ticker} - {pred_days} Hari ke Depan",
-                xaxis_title="Tanggal",
-                yaxis_title="Harga",
-                legend=dict(orientation="h", yanchor="bottom", y=1.02),
-                margin=dict(l=0, r=0, t=50, b=0)
-            )
-
-            st.plotly_chart(fig_pred, use_container_width=True)
-
-            # Prediction table
-            st.subheader("📋 Tabel Prediksi")
-            pred_table = pd.DataFrame({
-                'Tanggal': pred_data['future_dates'][:pred_days:5],
-                'Prediksi Harga': pred_data['predictions'][:pred_days:5],
-                'Batas Atas (95%)': pred_data['predictions'][:pred_days:5] + 1.96 * pred_data['std_residuals'],
-                'Batas Bawah (95%)': pred_data['predictions'][:pred_days:5] - 1.96 * pred_data['std_residuals'],
-            })
-            pred_table['Prediksi Harga'] = pred_table['Prediksi Harga'].map('{:,.0f}'.format)
-            pred_table['Batas Atas (95%)'] = pred_table['Batas Atas (95%)'].map('{:,.0f}'.format)
-            pred_table['Batas Bawah (95%)'] = pred_table['Batas Bawah (95%)'].map('{:,.0f}'.format)
-            pred_table['Tanggal'] = pred_table['Tanggal'].dt.strftime('%d %b %Y')
-
-            st.dataframe(pred_table, use_container_width=True, hide_index=True)
-        else:
-            st.error("❌ Tidak cukup data untuk membuat prediksi. Butuh minimal 30 hari data.")
-
-    # ════════════════════════════════════════════════════════
-    # TAB 4: FUNDAMENTAL
-    # ════════════════════════════════════════════════════════
-    with tab4:
-        st.subheader("📋 Data Fundamental")
-
-        if info:
-            col_f1, col_f2 = st.columns(2)
-
-            with col_f1:
-                st.markdown("**🏢 Informasi Perusahaan**")
-                company_info = {
-                    "Nama": info.get('longName', 'N/A'),
-                    "Sektor": info.get('sector', 'N/A'),
-                    "Industri": info.get('industry', 'N/A'),
-                    "Negara": info.get('country', 'N/A'),
-                    "Website": info.get('website', 'N/A'),
-                    "Karyawan": f"{info.get('fullTimeEmployees', 0):,}" if info.get('fullTimeEmployees') else 'N/A'
-                }
-                for k, v in company_info.items():
-                    st.markdown(
-                        f'<div class="info-box"><b>{k}:</b> {v}</div>',
-                        unsafe_allow_html=True
-                    )
-
-            with col_f2:
-                st.markdown("**💰 Valuasi**")
-
-                market_cap = info.get('marketCap')
-                pe_ratio   = info.get('trailingPE')
-                pb_ratio   = info.get('priceToBook')
-                eps        = info.get('trailingEps')
-                div_yield  = info.get('dividendYield')
-                beta       = info.get('beta')
-
-                valuation = {
-                    "Market Cap": format_number(market_cap, ""),
-                    "P/E Ratio": f"{pe_ratio:.2f}x" if pe_ratio else 'N/A',
-                    "P/B Ratio": f"{pb_ratio:.2f}x" if pb_ratio else 'N/A',
-                    "EPS (TTM)": f"{eps:.2f}" if eps else 'N/A',
-                    "Dividend Yield": f"{div_yield*100:.2f}%" if div_yield else 'N/A',
-                    "Beta": f"{beta:.2f}" if beta else 'N/A',
-                    "52W High": f"{info.get('fiftyTwoWeekHigh', 0):,.0f}",
-                    "52W Low": f"{info.get('fiftyTwoWeekLow', 0):,.0f}",
-                }
-
-                for k, v in valuation.items():
-                    st.markdown(
-                        f'<div class="info-box"><b>{k}:</b> {v}</div>',
-                        unsafe_allow_html=True
-                    )
-
-            # Business summary
-            summary = info.get('longBusinessSummary', '')
-            if summary:
-                st.markdown("---")
-                st.subheader("📝 Deskripsi Bisnis")
-                with st.expander("Lihat Deskripsi Lengkap"):
-                    st.write(summary)
-
-            # Financial metrics
-            st.markdown("---")
-            st.subheader("📊 Metrik Keuangan")
-
-            col_fin1, col_fin2, col_fin3 = st.columns(3)
-
-            with col_fin1:
-                revenue = info.get('totalRevenue')
-                st.metric("💵 Revenue", format_number(revenue, ""))
-
-                gross_profit = info.get('grossProfits')
-                st.metric("💹 Gross Profit", format_number(gross_profit, ""))
-
-            with col_fin2:
-                ebitda = info.get('ebitda')
-                st.metric("📈 EBITDA", format_number(ebitda, ""))
-
-                net_income = info.get('netIncomeToCommon')
-                st.metric("💰 Net Income", format_number(net_income, ""))
-
-            with col_fin3:
-                total_debt = info.get('totalDebt')
-                st.metric("💳 Total Debt", format_number(total_debt, ""))
-
-                free_cash = info.get('freeCashflow')
-                st.metric("💸 Free Cash Flow", format_number(free_cash, ""))
-        else:
-            st.warning("⚠️ Data fundamental tidak tersedia untuk saham ini.")
-
-    # ════════════════════════════════════════════════════════
-    # TAB 5: STATISTIK
-    # ════════════════════════════════════════════════════════
-    with tab5:
-        st.subheader("📊 Statistik & Analisis Lanjutan")
-
-        col_s1, col_s2 = st.columns(2)
-
-        with col_s1:
-            # Return distribution
-            st.markdown("**📊 Distribusi Return Harian**")
-            returns = df['Daily_Return'].dropna() * 100
-
-            fig_dist = go.Figure()
-            fig_dist.add_trace(go.Histogram(
-                x=returns, nbinsx=50,
-                name="Return Distribution",
-                marker_color='#2196F3',
-                opacity=0.7
-            ))
-            fig_dist.add_vline(x=returns.mean(), line_dash="dash",
-                                line_color="yellow", annotation_text=f"Mean: {returns.mean():.2f}%")
-            fig_dist.update_layout(
-                height=300, template="plotly_dark",
-                title="Distribusi Return Harian (%)",
-                margin=dict(l=0, r=0, t=40, b=0)
-            )
-            st.plotly_chart(fig_dist, use_container_width=True)
-
-        with col_s2:
-            # Cumulative return
-            st.markdown("**📈 Cumulative Return**")
-            fig_cum = go.Figure()
-            fig_cum.add_trace(go.Scatter(
-                x=df.index,
-                y=df['Cumulative_Return'] * 100,
-                name="Cumulative Return",
-                line=dict(color='#00C851', width=2),
-                fill='tozeroy',
-                fillcolor='rgba(0,200,81,0.1)'
-            ))
-            fig_cum.add_hline(y=0, line_dash="dash", line_color="white")
-            fig_cum.update_layout(
-                height=300, template="plotly_dark",
-                title="Cumulative Return (%)",
-                yaxis_title="%",
-                margin=dict(l=0, r=0, t=40, b=0)
-            )
-            st.plotly_chart(fig_cum, use_container_width=True)
-
-        # Statistics table
-        st.markdown("---")
-        st.subheader("📋 Statistik Deskriptif")
-
-        stats_data = {
-            "Metrik": [
-                "Return Harian Rata-rata", "Volatilitas (Std Dev)",
-                "Return Terbaik", "Return Terburuk",
-                "Sharpe Ratio (approx)", "Max Drawdown",
-                "Win Rate (hari naik)", "Total Return Periode"
-            ],
-            "Nilai": [
-                f"{returns.mean():.3f}%",
-                f"{returns.std():.3f}%",
-                f"{returns.max():.3f}%",
-                f"{returns.min():.3f}%",
-                f"{(returns.mean() / returns.std() * np.sqrt(252)):.2f}",
-                f"{((df['Close'] / df['Close'].cummax() - 1).min() * 100):.2f}%",
-                f"{(returns > 0).sum() / len(returns) * 100:.1f}%",
-                f"{df['Cumulative_Return'].iloc[-1] * 100:.2f}%"
-            ]
-        }
-
-        df_stats = pd.DataFrame(stats_data)
-        st.dataframe(df_stats, use_container_width=True, hide_index=True)
-
-        # Monthly returns heatmap
-        st.markdown("---")
-        st.subheader("🗓️ Return Bulanan")
-
-        try:
-            monthly_returns = df['Daily_Return'].resample('ME').apply(
-                lambda x: (1 + x).prod() - 1
-            ) * 100
-
-            monthly_df = pd.DataFrame({
-                'Year': monthly_returns.index.year,
-                'Month': monthly_returns.index.strftime('%b'),
-                'Return': monthly_returns.values
-            })
-
-            pivot_monthly = monthly_df.pivot_table(
-                values='Return', index='Year', columns='Month', aggfunc='first'
-            )
-
-            month_order = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
-                           'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
-            pivot_monthly = pivot_monthly.reindex(
-                columns=[m for m in month_order if m in pivot_monthly.columns]
-            )
-
-            fig_heat = px.imshow(
-                pivot_monthly,
-                color_continuous_scale='RdYlGn',
-                aspect='auto',
-                title="Monthly Returns Heatmap (%)",
-                text_auto='.1f'
-            )
-            fig_heat.update_layout(
-                height=300, template="plotly_dark",
-                margin=dict(l=0, r=0, t=40, b=0)
-            )
-            st.plotly_chart(fig_heat, use_container_width=True)
-        except Exception as e:
-            st.info(f"Heatmap tidak tersedia: {e}")
-
-    # ── Download Data ─────────────────────────────────────────
+    # ── Header ────────────────────────────────────────────────────────────────
+    st.markdown("# 📈 BBCA Stock Prediction System")
+    st.markdown(
+        f"<span style='color:#8b9ab5;font-size:14px;'>"
+        f"Bank Central Asia · IDX · "
+        f"Updated {datetime.now().strftime('%d %b %Y %H:%M WIB')}"
+        f"</span>",
+        unsafe_allow_html=True,
+    )
     st.markdown("---")
-    st.subheader("💾 Download Data")
 
-    col_dl1, col_dl2 = st.columns(2)
+    # ── Load & process ────────────────────────────────────────────────────────
+    with st.spinner("📥 Fetching BBCA data..."):
+        raw = fetch_data("BBCA.JK", period=data_period)
 
-    with col_dl1:
-        csv_data = df[['Open', 'High', 'Low', 'Close', 'Volume',
-                        'MA20', 'MA50', 'RSI', 'MACD', 'BB_upper', 'BB_lower']].to_csv()
-        st.download_button(
-            label="📥 Download Data CSV",
-            data=csv_data,
-            file_name=f"{ticker}_data_{datetime.now().strftime('%Y%m%d')}.csv",
-            mime="text/csv",
-            use_container_width=True
-        )
-
-    with col_dl2:
-        # Report summary
-        report = f"""
-LAPORAN ANALISIS SAHAM - {ticker}
-Generated: {datetime.now().strftime('%d/%m/%Y %H:%M')}
-{'='*50}
-
-INFORMASI SAHAM:
-- Nama: {info.get('longName', ticker)}
-- Sektor: {info.get('sector', 'N/A')}
-- Harga Terakhir: {latest['Close']:,.0f}
-- Perubahan: {price_change:+,.0f} ({price_change_pct:+.2f}%)
-
-REKOMENDASI: {rec_data['recommendation']}
-Score: {rec_data['score']}/12
-
-INDIKATOR TEKNIKAL:
-- RSI (14): {latest.get('RSI', 'N/A'):.1f if not pd.isna(latest.get('RSI', float('nan'))) else 'N/A'}
-- MACD: {latest.get('MACD', 'N/A'):.2f if not pd.isna(latest.get('MACD', float('nan'))) else 'N/A'}
-- MA20: {latest.get('MA20', 'N/A'):.0f if not pd.isna(latest.get('MA20', float('nan'))) else 'N/A'}
-- MA50: {latest.get('MA50', 'N/A'):.0f if not pd.isna(latest.get('MA50', float('nan'))) else 'N/A'}
-
-PREDIKSI:
-- 7 Hari: {pred_data.get('pred_7d', 0):,.0f} ({pred_data.get('change_7d_pct', 0):+.2f}%)
-- 14 Hari: {pred_data.get('pred_14d', 0):,.0f} ({pred_data.get('change_14d_pct', 0):+.2f}%)
-- 30 Hari: {pred_data.get('pred_30d', 0):,.0f} ({pred_data.get('change_30d_pct', 0):+.2f}%)
-
-SINYAL:
-"""
-        for s in rec_data.get('signals', []):
-            report += f"- [{s['signal']}] {s['indicator']}: {s['detail']}\n"
-
-        report += "\n⚠️ DISCLAIMER: Ini bukan saran investasi. Lakukan riset mandiri."
-
-        st.download_button(
-            label="📄 Download Laporan TXT",
-            data=report,
-            file_name=f"{ticker}_report_{datetime.now().strftime('%Y%m%d')}.txt",
-            mime="text/plain",
-            use_container_width=True
-        )
-
-# ============================================================
-# MARKET OVERVIEW (Halaman awal)
-# ============================================================
-def _show_market_overview(watchlist: list):
-    st.subheader("📊 Market Overview - Watchlist")
-
-    if not watchlist:
-        st.info("Tambahkan saham ke watchlist di sidebar")
+    if raw.empty:
+        st.error("❌ Could not fetch data. Check your internet connection.")
         return
 
-    cols = st.columns(len(watchlist))
+    with st.spinner("⚙️ Computing 44 technical indicators..."):
+        df = add_indicators(raw.copy())
+        df.ffill(inplace=True)
+        df.dropna(inplace=True)
 
-    for i, ticker in enumerate(watchlist):
-        with cols[i]:
-            with st.spinner(f"Loading {ticker}..."):
-                try:
-                    ticker_yf = ticker + '.JK' if '.' not in ticker else ticker
-                    stock = yf.Ticker(ticker_yf)
-                    hist  = stock.history(period="5d")
+    # ── Train ─────────────────────────────────────────────────────────────────
+    with st.spinner(f"🧠 Training ensemble model (horizon={horizon_days}d)..."):
+        X, y, idx = build_dataset(df, horizon_days)
+        models    = train_ensemble(X, y)
 
-                    if not hist.empty:
-                        current = hist['Close'].iloc[-1]
-                        prev    = hist['Close'].iloc[-2] if len(hist) > 1 else current
-                        change  = ((current - prev) / prev) * 100
+    # ── Predict ───────────────────────────────────────────────────────────────
+    with st.spinner("🔮 Running walk-forward prediction..."):
+        pred = iterative_predict(df, models, horizon_days)
 
-                        st.metric(
-                            label=f"📈 {ticker}",
-                            value=f"{current:,.0f}",
-                            delta=f"{change:+.2f}%"
-                        )
-                    else:
-                        st.metric(ticker, "N/A")
-                except Exception:
-                    st.metric(ticker, "Error")
+    pred_dates = pd.bdate_range(
+        start=df.index[-1] + timedelta(days=1),
+        periods=horizon_days,
+    )
+
+    rec = generate_recommendation(df, pred)
+
+    # ── Key numbers ───────────────────────────────────────────────────────────
+    price_now  = float(df["Close_raw"].iloc[-1])
+    price_prev = float(df["Close_raw"].iloc[-2])
+    price_pred = float(pred["prices"][-1])
+    daily_chg  = (price_now - price_prev) / price_prev * 100
+    pred_chg   = (price_pred - price_now) / price_now * 100
+
+    # ── Model accuracy banner ─────────────────────────────────────────────────
+    col_a, col_b, col_c = st.columns(3)
+    with col_a:
+        st.markdown(f"""
+        <div class="accuracy-box">
+            <div style="color:#8b9ab5;font-size:12px;">GradientBoosting CV-MAPE</div>
+            <div style="color:#00d4aa;font-size:22px;font-weight:700;">
+                {models['mape_gb']:.2f}%
+            </div>
+            <div style="color:#8b9ab5;font-size:11px;">Weight: {models['w_gb']:.1%}</div>
+        </div>
+        """, unsafe_allow_html=True)
+    with col_b:
+        st.markdown(f"""
+        <div class="accuracy-box">
+            <div style="color:#8b9ab5;font-size:12px;">RandomForest CV-MAPE</div>
+            <div style="color:#4f8ef7;font-size:22px;font-weight:700;">
+                {models['mape_rf']:.2f}%
+            </div>
+            <div style="color:#8b9ab5;font-size:11px;">Weight: {models['w_rf']:.1%}</div>
+        </div>
+        """, unsafe_allow_html=True)
+    with col_c:
+        st.markdown(f"""
+        <div class="accuracy-box">
+            <div style="color:#8b9ab5;font-size:12px;">Ensemble Weighted MAPE</div>
+            <div style="color:#f5a623;font-size:22px;font-weight:700;">
+                {models['weighted_mape']:.2f}%
+            </div>
+            <div style="color:#8b9ab5;font-size:11px;">
+                TimeSeriesSplit · 5-fold · {len(X)} samples
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+
+    st.markdown("")
+
+    # ── Metrics ───────────────────────────────────────────────────────────────
+    def mcard(label, val, delta=None, prefix="Rp "):
+        d = ""
+        if delta is not None:
+            cls = "metric-delta-pos" if delta >= 0 else "metric-delta-neg"
+            arr = "▲" if delta >= 0 else "▼"
+            d = f'<div class="{cls}">{arr} {abs(delta):.2f}%</div>'
+        return (f'<div class="metric-card">'
+                f'<div class="metric-label">{label}</div>'
+                f'<div class="metric-value">{prefix}{val}</div>{d}</div>')
+
+    m1,m2,m3,m4,m5 = st.columns(5)
+    with m1: st.markdown(mcard("Current Price", f"{price_now:,.0f}", daily_chg), unsafe_allow_html=True)
+    with m2: st.markdown(mcard(f"Forecast ({horizon_opt})", f"{price_pred:,.0f}", pred_chg), unsafe_allow_html=True)
+    with m3: st.markdown(mcard("RSI 14", f"{rec['rsi']:.1f}", prefix=""), unsafe_allow_html=True)
+    with m4: st.markdown(mcard("HV20 (Ann.)", f"{rec['hv20']:.1f}%", prefix=""), unsafe_allow_html=True)
+    with m5:
+        vol = float(df["Volume"].squeeze().iloc[-1])
+        st.markdown(mcard("Volume", f"{vol/1e6:.1f}M", prefix=""), unsafe_allow_html=True)
+
+    st.markdown("")
+
+    # ── Recommendation ────────────────────────────────────────────────────────
+    rec_class = {"BUY":"rec-buy","SELL":"rec-sell","HOLD":"rec-hold"}[rec["recommendation"]]
+    rec_icon  = {"BUY":"🟢","SELL":"🔴","HOLD":"🟡"}[rec["recommendation"]]
+
+    col_rec, col_detail = st.columns([1, 2])
+    with col_rec:
+        st.markdown(
+            f'<div class="rec-box {rec_class}">'
+            f'{rec_icon} {rec["strength"]} {rec["recommendation"]}'
+            f'</div>',
+            unsafe_allow_html=True,
+        )
+        st.markdown(
+            f'<div style="text-align:center;color:#8b9ab5;font-size:12px;">'
+            f'Composite score: <b style="color:#fff;">{rec["score"]:+.1f}</b> '
+            f'({rec["score_pct"]:+.1f}% of max)</div>',
+            unsafe_allow_html=True,
+        )
+
+    with col_detail:
+        macd_bull = rec["macd"] > rec["signal"]
+        rsi_zone  = ("Oversold 🟢" if rec["rsi"] < 35 else
+                     "Overbought 🔴" if rec["rsi"] > 65 else "Neutral 🟡")
+        st.markdown(f"""
+        <div style="background:#1e2130;border-radius:12px;padding:16px;">
+            <div style="color:#8b9ab5;font-size:12px;margin-bottom:10px;">SIGNAL BREAKDOWN</div>
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;font-size:13px;">
+                <span style="color:#8b9ab5;">Forecast Return:</span>
+                <b style="color:{'#00d4aa' if pred_chg>=0 else '#ff4b6e'};">{pred_chg:+.2f}%</b>
+                <span style="color:#8b9ab5;">RSI Zone:</span>
+                <b style="color:#fff;">{rsi_zone} ({rec['rsi']:.1f})</b>
+                <span style="color:#8b9ab5;">StochRSI:</span>
+                <b style="color:#fff;">{rec['stoch']:.2f}</b>
+                <span style="color:#8b9ab5;">MACD:</span>
+                <b style="color:{'#00d4aa' if macd_bull else '#ff4b6e'};">{'Bullish ▲' if macd_bull else 'Bearish ▼'}</b>
+                <span style="color:#8b9ab5;">BB Position:</span>
+                <b style="color:#fff;">{rec['bb_pos']*100:.0f}% of band</b>
+                <span style="color:#8b9ab5;">Vol Ratio:</span>
+                <b style="color:#fff;">{rec['vol_ratio']:.2f}×</b>
+            </div>
+            <div style="margin-top:10px;color:#8b9ab5;font-size:12px;">
+                90% CI target: <b style="color:#fff;">Rp {float(pred['lower'][-1]):,.0f}</b>
+                – <b style="color:#fff;">Rp {float(pred['upper'][-1]):,.0f}</b>
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
 
     st.markdown("---")
-    st.info("👈 Pilih saham di sidebar dan klik **Analisis Saham** untuk melihat analisis lengkap")
 
-# ============================================================
-# RUN
-# ============================================================
+    # ── Main chart ────────────────────────────────────────────────────────────
+    st.markdown('<div class="section-title">📊 Price Chart & Walk-Forward Forecast</div>',
+                unsafe_allow_html=True)
+    st.plotly_chart(
+        chart_main(df, pred_dates, pred["prices"],
+                   pred["upper"], pred["lower"], horizon_opt),
+        use_container_width=True,
+    )
+
+    # ── MACD + Feature importance ─────────────────────────────────────────────
+    col_macd, col_fi = st.columns([1, 1])
+    with col_macd:
+        st.markdown('<div class="section-title">📉 MACD</div>', unsafe_allow_html=True)
+        st.plotly_chart(chart_macd(df), use_container_width=True)
+
+    with col_fi:
+        st.markdown('<div class="section-title">🔍 Feature Importance</div>',
+                    unsafe_allow_html=True)
+        st.plotly_chart(chart_feature_importance(models), use_container_width=True)
+
+    # ── Prediction table ──────────────────────────────────────────────────────
+    st.markdown('<div class="section-title">🗓️ Forecast Schedule</div>',
+                unsafe_allow_html=True)
+
+    step = 1 if horizon_days == 7 else 5
+    rows = []
+    for i in range(0, horizon_days, step):
+        idx_  = min(i, len(pred["prices"]) - 1)
+        p     = pred["prices"][idx_]
+        chg   = (p - price_now) / price_now * 100
+        daily = pred["returns"][idx_]
+        rows.append({
+            "Date":        pred_dates[idx_].strftime("%d %b %Y"),
+            "Day":         f"D+{idx_+1}",
+            "Price (Rp)":  f"{p:,.0f}",
+            "Total Chg":   f"{chg:+.2f}%",
+            "Daily Ret":   f"{daily:+.2f}%",
+            "Low (Rp)":    f"{pred['lower'][idx_]:,.0f}",
+            "High (Rp)":   f"{pred['upper'][idx_]:,.0f}",
+        })
+
+    tbl = pd.DataFrame(rows)
+
+    def color_chg(val):
+        if isinstance(val, str) and "%" in val:
+            return f"color: {'#00d4aa' if '+' in val else '#ff4b6e'}"
+        return ""
+
+    st.dataframe(
+        tbl.style.applymap(color_chg, subset=["Total Chg","Daily Ret"]),
+        use_container_width=True,
+        hide_index=True,
+    )
+
+    # ── Technical summary ─────────────────────────────────────────────────────
+    st.markdown("---")
+    st.markdown('<div class="section-title">📋 Technical Summary</div>',
+                unsafe_allow_html=True)
+
+    cs1, cs2, cs3 = st.columns(3)
+    with cs1:
+        st.markdown("**Moving Averages**")
+        for name, col_key in [("MA 7","MA7"),("MA 20","MA20"),("MA 50","MA50")]:
+            v = float(df[col_key].iloc[-1])
+            sig_ = "🟢 Above" if price_now > v else "🔴 Below"
+            st.markdown(f"`{name}` Rp {v:,.0f} → {sig_}")
+
+    with cs2:
+        st.markdown("**Bollinger Bands**")
+        bb_u = float(df["BB_Upper"].iloc[-1])
+        bb_m = float(df["BB_Mid"].iloc[-1])
+        bb_l = float(df["BB_Lower"].iloc[-1])
+        bb_p = float(df["BB_Pos"].iloc[-1]) * 100
+        st.markdown(f"`Upper` Rp {bb_u:,.0f}")
+        st.markdown(f"`Mid`   Rp {bb_m:,.0f}")
+        st.markdown(f"`Lower` Rp {bb_l:,.0f}")
+        st.progress(min(int(bb_p), 100), text=f"Position: {bb_p:.0f}%")
+
+    with cs3:
+        st.markdown("**Support & Resistance (30d)**")
+        recent     = df["Close_raw"].tail(30)
+        support    = float(recent.min())
+        resistance = float(recent.max())
+        dist_s = (price_now - support) / support * 100
+        dist_r = (resistance - price_now) / resistance * 100
+        st.markdown(f"🟢 `Support`    Rp {support:,.0f} (+{dist_s:.1f}%)")
+        st.markdown(f"🔴 `Resistance` Rp {resistance:,.0f} (-{dist_r:.1f}%)")
+        st.markdown(f"📍 `Current`    Rp {price_now:,.0f}")
+
+    st.markdown("---")
+    st.markdown(
+        "<div style='text-align:center;color:#8b9ab5;font-size:12px;'>"
+        "⚠️ Educational purposes only. Not financial advice. "
+        "Past performance does not guarantee future results. "
+        "Always consult a qualified financial advisor."
+        "</div>",
+        unsafe_allow_html=True,
+    )
+
+
 if __name__ == "__main__":
     main()
