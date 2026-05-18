@@ -835,57 +835,57 @@ with tab1:
 
 
 # ─── TAB 2: FUNDAMENTAL ───────────────────────────────────────────────────────
-with tab2:
-    st.subheader("🏢 Data Fundamental")
-    if include_fundamental:
-        with st.spinner("Memuat fundamental..."):
-            fundamental = fetch_stock_info(ticker)
+# with tab2:
+#     st.subheader("🏢 Data Fundamental")
+#     if include_fundamental:
+#         with st.spinner("Memuat fundamental..."):
+#             fundamental = fetch_stock_info(ticker)
 
-        def show_val(v, is_pct=False):
-            if v in ("N/A", None):
-                return "N/A"
-            try:
-                fv = float(v)
-                if is_pct:
-                    return f"{fv*100:.2f}%"
-                if fv > 1_000_000_000_000:
-                    return f"Rp {fv/1_000_000_000_000:.2f}T"
-                return f"{fv:.2f}"
-            except Exception:
-                return str(v)
+#         def show_val(v, is_pct=False):
+#             if v in ("N/A", None):
+#                 return "N/A"
+#             try:
+#                 fv = float(v)
+#                 if is_pct:
+#                     return f"{fv*100:.2f}%"
+#                 if fv > 1_000_000_000_000:
+#                     return f"Rp {fv/1_000_000_000_000:.2f}T"
+#                 return f"{fv:.2f}"
+#             except Exception:
+#                 return str(v)
 
-        col_f1, col_f2 = st.columns(2)
-        with col_f1:
-            st.markdown("#### 📊 Valuasi")
-            for k in ["P/E Ratio", "P/B Ratio", "EPS", "Market Cap", "Beta"]:
-                a, b = st.columns(2)
-                a.write(f"**{k}**")
-                b.write(show_val(fundamental.get(k)))
+#         col_f1, col_f2 = st.columns(2)
+#         with col_f1:
+#             st.markdown("#### 📊 Valuasi")
+#             for k in ["P/E Ratio", "P/B Ratio", "EPS", "Market Cap", "Beta"]:
+#                 a, b = st.columns(2)
+#                 a.write(f"**{k}**")
+#                 b.write(show_val(fundamental.get(k)))
 
-            st.markdown("#### 📈 Pertumbuhan")
-            for k in ["Revenue Growth", "Earnings Growth",
-                      "Profit Margin", "Operating Margin"]:
-                a, b = st.columns(2)
-                a.write(f"**{k}**")
-                b.write(show_val(fundamental.get(k), is_pct=True))
+#             st.markdown("#### 📈 Pertumbuhan")
+#             for k in ["Revenue Growth", "Earnings Growth",
+#                       "Profit Margin", "Operating Margin"]:
+#                 a, b = st.columns(2)
+#                 a.write(f"**{k}**")
+#                 b.write(show_val(fundamental.get(k), is_pct=True))
 
-        with col_f2:
-            st.markdown("#### 💪 Kesehatan Keuangan")
-            for k, pct_flag in [("ROE", True), ("ROA", True),
-                                 ("Debt to Equity", False),
-                                 ("Current Ratio", False),
-                                 ("Dividend Yield", True)]:
-                a, b = st.columns(2)
-                a.write(f"**{k}**")
-                b.write(show_val(fundamental.get(k), is_pct=pct_flag))
+#         with col_f2:
+#             st.markdown("#### 💪 Kesehatan Keuangan")
+#             for k, pct_flag in [("ROE", True), ("ROA", True),
+#                                  ("Debt to Equity", False),
+#                                  ("Current Ratio", False),
+#                                  ("Dividend Yield", True)]:
+#                 a, b = st.columns(2)
+#                 a.write(f"**{k}**")
+#                 b.write(show_val(fundamental.get(k), is_pct=pct_flag))
 
-            st.markdown("#### 📉 Range Harga")
-            for k in ["52W High", "52W Low", "Avg Volume"]:
-                a, b = st.columns(2)
-                a.write(f"**{k}**")
-                b.write(show_val(fundamental.get(k)))
-    else:
-        st.info("Aktifkan 'Data Fundamental' di sidebar.")
+#             st.markdown("#### 📉 Range Harga")
+#             for k in ["52W High", "52W Low", "Avg Volume"]:
+#                 a, b = st.columns(2)
+#                 a.write(f"**{k}**")
+#                 b.write(show_val(fundamental.get(k)))
+#     else:
+#         st.info("Aktifkan 'Data Fundamental' di sidebar.")
 
 
 # ─── TAB 3: BERITA ────────────────────────────────────────────────────────────
