@@ -6,20 +6,20 @@ import os
 from dotenv import load_dotenv
 import time
 
-from modules.stock_data import (
+from utils.stock_data import (
     get_indonesian_stocks,
     fetch_stock_data,
     fetch_stock_info,
     get_current_price,
 )
-from modules.technical_indicators import calculate_all_indicators, get_indicator_summary
-from modules.news_scraper import (
+from utils.technical_indicators import calculate_all_indicators, get_indicator_summary
+from utils.news_scraper import (
     fetch_rss_news,
     fetch_google_news,
     get_market_sentiment_news,
     format_news_for_llm,
 )
-from modules.llm_analyzer import setup_gemini, analyze_stock
+from utils.llm_analyzer import setup_gemini, analyze_stock
 
 load_dotenv()
 
