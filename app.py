@@ -508,27 +508,7 @@ Tanggal Analisis: {datetime.now().strftime("%d %B %Y, %H:%M WIB")}
 ═══════════════════════════════════════════════════════
 INSTRUKSI: Berikan analisis LENGKAP dengan format berikut:
 ═══════════════════════════════════════════════════════
-
-## 1. RINGKASAN KONDISI SAHAM
-[Deskripsikan kondisi umum saham saat ini]
-
-## 2. ANALISIS TEKNIKAL
-### Tren Utama
-### Momentum  
-### Volatilitas & Volume
-### Support & Resistance
-- Support 1: Rp ...
-- Support 2: Rp ...
-- Resistance 1: Rp ...
-- Resistance 2: Rp ...
-
-## 3. ANALISIS FUNDAMENTAL
-[Evaluasi valuasi dan kesehatan keuangan]
-
-## 4. ANALISIS SENTIMEN BERITA
-[Dampak berita terhadap saham]
-
-## 5. PREDIKSI PERGERAKAN HARGA
+## 1. PREDIKSI PERGERAKAN HARGA
 
 ### 📅 7 HARI KE DEPAN
 - **Prediksi Arah**: [NAIK/TURUN/SIDEWAYS]
@@ -542,7 +522,7 @@ INSTRUKSI: Berikan analisis LENGKAP dengan format berikut:
 - **Probabilitas**: ...%
 - **Alasan**: [3-5 poin]
 
-## 6. REKOMENDASI
+## 2. REKOMENDASI
 
 ### 🎯 REKOMENDASI: [STRONG BUY / BUY / HOLD / SELL / STRONG SELL]
 
@@ -560,14 +540,33 @@ INSTRUKSI: Berikan analisis LENGKAP dengan format berikut:
 - **Swing Trader (1-4 minggu)**: ...
 - **Investor Panjang (> 3 bulan)**: ...
 
-## 7. RISIKO UTAMA
+## 3. RISIKO UTAMA
 [3-5 risiko yang perlu diwaspadai]
+
+## 4. RINGKASAN KONDISI SAHAM
+[Deskripsikan kondisi umum saham saat ini]
+
+## 5. ANALISIS TEKNIKAL
+### Tren Utama
+### Momentum  
+### Volatilitas & Volume
+### Support & Resistance
+- Support 1: Rp ...
+- Support 2: Rp ...
+- Resistance 1: Rp ...
+- Resistance 2: Rp ...
+
+## 6. ANALISIS FUNDAMENTAL
+[Evaluasi valuasi dan kesehatan keuangan]
+
+## 7. ANALISIS SENTIMEN BERITA
+[Dampak berita terhadap saham]
 
 ## 8. KESIMPULAN
 [Paragraf penutup]
 
 ---
-⚠️ DISCLAIMER: Analisis ini hanya untuk edukasi, bukan saran investasi resmi.
+⚠️ DISCLAIMER: Analisis ini bukan saran investasi resmi.
 """
 
 
