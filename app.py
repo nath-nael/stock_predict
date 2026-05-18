@@ -15,7 +15,7 @@ from datetime import datetime
 
 # ─── PAGE CONFIG ─────────────────────────────────────────────────────────────
 st.set_page_config(
-    page_title="🇮🇩 Analisis Saham Indonesia AI",
+    page_title="🇮🇩 Analisis Saham & Emas AI",
     page_icon="📈",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -36,7 +36,7 @@ st.markdown("""
 
 st.markdown("""
 <div class="main-header">
-    <h1>🇮🇩 Analisis Saham Indonesia</h1>
+    <h1>🇮🇩 Analisis Saham & Emas AI</h1>
     <p>Powered by Gemini 2.5 Flash AI • Real-time Technical & Fundamental Analysis</p>
 </div>
 """, unsafe_allow_html=True)
@@ -80,7 +80,7 @@ def fetch_stock_data(ticker: str, period: str = "6mo") -> pd.DataFrame:
         df.index = df.index.tz_localize(None)
         return df
     except Exception as e:
-        raise Exception(f"Gagal mengambil data saham: {str(e)}")
+        raise Exception(f"Gagal mengambil data: {str(e)}")
 
 
 @st.cache_data(ttl=300)
@@ -136,12 +136,94 @@ def get_current_price(ticker: str) -> dict:
             "change_pct": round(float(change_pct), 2),
             "volume": int(hist["Volume"].iloc[-1]) if len(hist) > 0 else 0,
         }
-    except Exception as e:
+    except Exception:
         return {"current_price": 0, "change": 0, "change_pct": 0, "volume": 0}
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# SECTION 2: TECHNICAL INDICATORS
+# SECTION 2: GOLD DATA
+# ══════════════════════════════════════════════════════════════════════════════
+
+@st.cache_data(ttl=300)
+def fetch_gold_data(period="6mo"):
+    """Ambil harga emas & aset korelasi"""
+    gold = yf.Ticker("GC=F")
+    df_gold = gold.history(period=period)
+    df_gold.index = pd.to_datetime(df_gold.index).tz_localize(None)
+
+    corr_data = {}
+    corr_tickers = {
+        "DXY"   : "DX-Y.NYB",
+        "VIX"   : "^VIX",
+        "US10Y" : "^TNX",
+        "Silver": "SI=F",
+        "SP500" : "^GSPC",
+    }
+    for name, t in corr_tickers.items():
+        try:
+            hist = yf.Ticker(t).history(period=period)
+            hist.index = pd.to_datetime(hist.index).tz_localize(None)
+            corr_data[name] = hist["Close"]
+        except Exception:
+            corr_data[name] = None
+
+    return df_gold, corr_data
+
+
+@st.cache_data(ttl=300)
+def fetch_gold_antam() -> dict:
+    """Scraping harga emas Antam dari logammulia.com"""
+    try:
+        url = "https://www.logammulia.com/id/harga-emas-hari-ini"
+        headers = {"User-Agent": "Mozilla/5.0"}
+        resp = requests.get(url, headers=headers, timeout=10)
+        soup = BeautifulSoup(resp.text, "html.parser")
+        tables = soup.find_all("table")
+        prices = {}
+        for table in tables:
+            for row in table.find_all("tr"):
+                cols = row.find_all("td")
+                if len(cols) >= 2:
+                    gram = cols[0].get_text(strip=True)
+                    price = cols[1].get_text(strip=True)
+                    if "gram" in gram.lower() or "gr" in gram.lower():
+                        prices[gram] = price
+        return prices if prices else {"status": "Tidak dapat mengambil data"}
+    except Exception as e:
+        return {"error": str(e)}
+
+
+def calculate_gold_indicators(df: pd.DataFrame, corr_data: dict) -> pd.DataFrame:
+    """Hitung indikator teknikal + indikator khusus emas"""
+    df = calculate_all_indicators(df)
+
+    # Korelasi DXY
+    if corr_data.get("DXY") is not None:
+        dxy = corr_data["DXY"].reindex(df.index, method="ffill")
+        df["DXY"] = dxy
+        df["Gold_DXY_Corr"] = df["Close"].rolling(20).corr(df["DXY"])
+
+    # Gold/Silver Ratio
+    if corr_data.get("Silver") is not None:
+        silver = corr_data["Silver"].reindex(df.index, method="ffill")
+        df["Silver"] = silver
+        df["Gold_Silver_Ratio"] = df["Close"] / df["Silver"]
+
+    # Volatility
+    df["Returns"] = df["Close"].pct_change()
+    df["Volatility_20"] = df["Returns"].rolling(20).std() * (252 ** 0.5) * 100
+
+    # VIX & US10Y
+    for key in ["VIX", "US10Y"]:
+        if corr_data.get(key) is not None:
+            series = corr_data[key].reindex(df.index, method="ffill")
+            df[key] = series
+
+    return df
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# SECTION 3: TECHNICAL INDICATORS
 # ══════════════════════════════════════════════════════════════════════════════
 
 def calculate_all_indicators(df: pd.DataFrame) -> pd.DataFrame:
@@ -300,7 +382,7 @@ def get_indicator_summary(df: pd.DataFrame) -> dict:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# SECTION 3: NEWS SCRAPER
+# SECTION 4: NEWS SCRAPER
 # ══════════════════════════════════════════════════════════════════════════════
 
 def clean_html(text: str) -> str:
@@ -311,18 +393,20 @@ def clean_html(text: str) -> str:
         clean = soup.get_text()
     except Exception:
         clean = re.sub(r"<[^>]+>", "", text)
-    clean = re.sub(r"\s+", " ", clean).strip()
-    return clean
+    return re.sub(r"\s+", " ", clean).strip()
 
 
 @st.cache_data(ttl=600)
-def fetch_google_news(query: str, max_articles: int = 8) -> list:
+def fetch_google_news(query: str, max_articles: int = 8, lang: str = "id") -> list:
     articles = []
     try:
-        encoded_query = requests.utils.quote(f"{query} saham Indonesia")
-        url = (f"https://news.google.com/rss/search?"
-               f"q={encoded_query}&hl=id&gl=ID&ceid=ID:id")
-        headers = {"User-Agent": "Mozilla/5.0"}
+        encoded_query = requests.utils.quote(query)
+        if lang == "id":
+            url = (f"https://news.google.com/rss/search?"
+                   f"q={encoded_query}&hl=id&gl=ID&ceid=ID:id")
+        else:
+            url = (f"https://news.google.com/rss/search?"
+                   f"q={encoded_query}&hl=en&gl=US&ceid=US:en")
         feed = feedparser.parse(url)
         for entry in feed.entries[:max_articles]:
             articles.append({
@@ -343,13 +427,10 @@ def fetch_stock_news(stock_name: str, ticker: str, max_articles: int = 10) -> li
     clean_ticker = ticker.replace(".JK", "")
     articles = []
 
-    # Google News untuk saham spesifik
-    queries = [clean_ticker, f"{clean_ticker} saham", stock_name.split(" - ")[0]]
-    for query in queries[:2]:
-        news = fetch_google_news(query, max_articles=5)
-        articles.extend(news)
+    for query in [clean_ticker, f"{clean_ticker} saham"]:
+        articles.extend(fetch_google_news(
+            f"{query} saham Indonesia", max_articles=5))
 
-    # RSS feeds Indonesia
     rss_feeds = {
         "Kontan": "https://rss.kontan.co.id/category/investasi",
         "CNBC Indonesia": "https://www.cnbcindonesia.com/rss",
@@ -360,8 +441,7 @@ def fetch_stock_news(stock_name: str, ticker: str, max_articles: int = 10) -> li
             for entry in feed.entries[:20]:
                 title = entry.get("title", "")
                 summary = entry.get("summary", "")
-                combined = (title + " " + summary).upper()
-                if clean_ticker.upper() in combined:
+                if clean_ticker.upper() in (title + summary).upper():
                     articles.append({
                         "source": source,
                         "title": title,
@@ -373,25 +453,73 @@ def fetch_stock_news(stock_name: str, ticker: str, max_articles: int = 10) -> li
         except Exception:
             continue
 
-    # Deduplicate by title
-    seen = set()
-    unique_articles = []
+    # Deduplicate
+    seen, unique = set(), []
     for a in articles:
         if a["title"] not in seen:
             seen.add(a["title"])
-            unique_articles.append(a)
-
-    return unique_articles[:max_articles]
+            unique.append(a)
+    return unique[:max_articles]
 
 
 @st.cache_data(ttl=600)
 def fetch_market_news() -> list:
     articles = []
-    queries = ["IHSG", "Bank Indonesia suku bunga", "ekonomi Indonesia"]
-    for query in queries:
-        news = fetch_google_news(query, max_articles=3)
-        articles.extend(news)
+    for query in ["IHSG", "Bank Indonesia suku bunga", "ekonomi Indonesia"]:
+        articles.extend(fetch_google_news(
+            f"{query} saham Indonesia", max_articles=3))
     return articles[:10]
+
+
+@st.cache_data(ttl=600)
+def fetch_gold_news() -> list:
+    all_articles = []
+
+    # Berita bahasa Inggris (global)
+    en_queries = [
+        "gold price forecast",
+        "Federal Reserve interest rate gold",
+        "US inflation CPI gold",
+        "geopolitical conflict war gold safe haven",
+        "central bank gold reserve buying",
+    ]
+    for query in en_queries:
+        all_articles.extend(
+            fetch_google_news(query, max_articles=3, lang="en"))
+
+    # Berita bahasa Indonesia
+    id_queries = ["harga emas hari ini", "emas antam logam mulia"]
+    for query in id_queries:
+        all_articles.extend(
+            fetch_google_news(query, max_articles=3, lang="id"))
+
+    # RSS komoditas
+    rss_feeds = {
+        "Kitco": "https://www.kitco.com/rss/kitconews.rss",
+        "Reuters Commodities": "https://feeds.reuters.com/reuters/commoditiesNews",
+    }
+    for source, url in rss_feeds.items():
+        try:
+            feed = feedparser.parse(url)
+            for entry in feed.entries[:4]:
+                all_articles.append({
+                    "source": source,
+                    "title": entry.get("title", ""),
+                    "summary": clean_html(entry.get("summary", ""))[:400],
+                    "link": entry.get("link", ""),
+                    "published": entry.get("published", ""),
+                    "relevant": True,
+                })
+        except Exception:
+            continue
+
+    # Deduplicate
+    seen, unique = set(), []
+    for a in all_articles:
+        if a["title"] not in seen:
+            seen.add(a["title"])
+            unique.append(a)
+    return unique[:20]
 
 
 def format_news_for_llm(articles: list) -> str:
@@ -410,23 +538,22 @@ def format_news_for_llm(articles: list) -> str:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# SECTION 4: LLM ANALYZER
+# SECTION 5: LLM ANALYZER
 # ══════════════════════════════════════════════════════════════════════════════
 
 def setup_gemini(api_key: str):
     genai.configure(api_key=api_key)
-    model = genai.GenerativeModel("gemini-2.5-flash")
-    return model
+    return genai.GenerativeModel("gemini-2.5-flash")
 
 
-def build_prompt(ticker, stock_name, current_price, df,
-                 fundamental, news_text, market_news) -> str:
+def build_stock_prompt(ticker, stock_name, current_price, df,
+                       fundamental, news_text, market_news) -> str:
     latest = df.iloc[-1]
-
-    price_1w = df["Close"].iloc[-5] if len(df) >= 5 else df["Close"].iloc[0]
-    price_1m = df["Close"].iloc[-20] if len(df) >= 20 else df["Close"].iloc[0]
-    price_3m = df["Close"].iloc[-60] if len(df) >= 60 else df["Close"].iloc[0]
     current = current_price["current_price"]
+
+    price_1w = float(df["Close"].iloc[-5] if len(df) >= 5 else df["Close"].iloc[0])
+    price_1m = float(df["Close"].iloc[-20] if len(df) >= 20 else df["Close"].iloc[0])
+    price_3m = float(df["Close"].iloc[-60] if len(df) >= 60 else df["Close"].iloc[0])
 
     def pct(a, b):
         return ((a - b) / b * 100) if b > 0 else 0
@@ -459,9 +586,9 @@ Tanggal Analisis: {datetime.now().strftime("%d %B %Y, %H:%M WIB")}
 ├── Harga Saat Ini   : Rp {current:,.0f}
 ├── Perubahan Hari   : {current_price['change']:+.0f} ({current_price['change_pct']:+.2f}%)
 ├── Volume Hari Ini  : {current_price['volume']:,.0f}
-├── Performa 1 Minggu: {pct(current, float(price_1w)):+.2f}%
-├── Performa 1 Bulan : {pct(current, float(price_1m)):+.2f}%
-└── Performa 3 Bulan : {pct(current, float(price_3m)):+.2f}%
+├── Performa 1 Minggu: {pct(current, price_1w):+.2f}%
+├── Performa 1 Bulan : {pct(current, price_1m):+.2f}%
+└── Performa 3 Bulan : {pct(current, price_3m):+.2f}%
 
 📈 INDIKATOR TEKNIKAL
 ├── RSI (14)         : {latest['RSI']:.2f}
@@ -508,6 +635,7 @@ Tanggal Analisis: {datetime.now().strftime("%d %B %Y, %H:%M WIB")}
 ═══════════════════════════════════════════════════════
 INSTRUKSI: Berikan analisis LENGKAP dengan format berikut:
 ═══════════════════════════════════════════════════════
+
 ## 1. PREDIKSI PERGERAKAN HARGA
 
 ### 📅 7 HARI KE DEPAN
@@ -544,11 +672,11 @@ INSTRUKSI: Berikan analisis LENGKAP dengan format berikut:
 [3-5 risiko yang perlu diwaspadai]
 
 ## 4. RINGKASAN KONDISI SAHAM
-[Deskripsikan kondisi umum saham saat ini]
+[Kondisi umum saham saat ini]
 
 ## 5. ANALISIS TEKNIKAL
 ### Tren Utama
-### Momentum  
+### Momentum
 ### Volatilitas & Volume
 ### Support & Resistance
 - Support 1: Rp ...
@@ -570,10 +698,123 @@ INSTRUKSI: Berikan analisis LENGKAP dengan format berikut:
 """
 
 
-def analyze_with_gemini(model, ticker, stock_name, current_price,
-                        df, fundamental, news_text, market_news) -> str:
-    prompt = build_prompt(ticker, stock_name, current_price,
-                          df, fundamental, news_text, market_news)
+def build_gold_prompt(current_price, df, corr_data, antam_prices, news_text) -> str:
+    latest = df.iloc[-1]
+
+    def safe(key, fmt_str=".2f"):
+        val = latest.get(key, None)
+        if val is None or (isinstance(val, float) and np.isnan(val)):
+            return "N/A"
+        try:
+            return format(float(val), fmt_str)
+        except Exception:
+            return "N/A"
+
+    antam_str = "\n".join(
+        [f"  {k}: {v}" for k, v in antam_prices.items()]
+    ) if antam_prices else "Data tidak tersedia"
+
+    return f"""
+Kamu adalah analis komoditas emas kelas dunia dengan spesialisasi
+geopolitik, makroekonomi global, dan pasar logam mulia.
+
+═══════════════════════════════════════════════════════
+🥇 ANALISIS EMAS KOMPREHENSIF
+Tanggal: {datetime.now().strftime("%d %B %Y, %H:%M WIB")}
+═══════════════════════════════════════════════════════
+
+💰 HARGA EMAS SAAT INI
+├── Gold Futures (COMEX) : ${current_price['current_price']:,.2f} / troy oz
+├── Perubahan Hari       : ${current_price['change']:+.2f} ({current_price['change_pct']:+.2f}%)
+└── Volume               : {current_price['volume']:,.0f}
+
+🏷️ HARGA EMAS ANTAM (IDR)
+{antam_str}
+
+📊 INDIKATOR TEKNIKAL EMAS
+├── RSI (14)         : {safe('RSI')}
+├── MACD             : {safe('MACD', '.4f')}
+├── MACD Signal      : {safe('MACD_Signal', '.4f')}
+├── Stochastic K/D   : {safe('Stoch_K')} / {safe('Stoch_D')}
+├── SMA 20           : ${safe('SMA_20', ',.2f')}
+├── SMA 50           : ${safe('SMA_50', ',.2f')}
+├── BB Upper         : ${safe('BB_Upper', ',.2f')}
+├── BB Lower         : ${safe('BB_Lower', ',.2f')}
+├── ATR (14)         : ${safe('ATR')}
+└── Volatility (20d) : {safe('Volatility_20')}% annualized
+
+🌍 INDIKATOR MAKRO & KORELASI
+├── US Dollar Index (DXY) : {safe('DXY')} [korelasi NEGATIF dengan emas]
+├── VIX Fear Index        : {safe('VIX')} [tinggi = bullish emas]
+├── US 10Y Yield          : {safe('US10Y')}% [tinggi = bearish emas]
+└── Gold/Silver Ratio     : {safe('Gold_Silver_Ratio')} [normal: 60-80]
+
+📰 BERITA & SENTIMEN GLOBAL
+{news_text}
+
+═══════════════════════════════════════════════════════
+INSTRUKSI ANALISIS EMAS:
+═══════════════════════════════════════════════════════
+
+## 1. PREDIKSI HARGA EMAS
+
+### 📅 7 HARI KE DEPAN
+- Prediksi: [NAIK/TURUN/SIDEWAYS]
+- Target: $... - $... (estimasi Rp.../gram)
+- Probabilitas: ...%
+- Driver utama: ...
+
+### 📅 30 HARI KE DEPAN
+- Prediksi: [NAIK/TURUN/SIDEWAYS]
+- Target: $... - $... (estimasi Rp.../gram)
+- Probabilitas: ...%
+- Driver utama: ...
+
+## 2. REKOMENDASI
+
+### 🎯 [STRONG BUY / BUY / HOLD / SELL / STRONG SELL]
+
+| Parameter | USD | IDR (estimasi/gram) |
+|-----------|-----|---------------------|
+| Entry | $... | Rp ... |
+| Target 7H | $... | Rp ... |
+| Target 30H | $... | Rp ... |
+| Stop Loss | $... | Rp ... |
+| Risk/Reward | ... | ... |
+
+### Strategi per Profil:
+- **Trader Pendek**: ...
+- **Swing Trader**: ...
+- **Investor/Hedging Jangka Panjang**: ...
+
+## 3. FAKTOR PENGGERAK EMAS
+### Geopolitik & Risiko Global
+### Kebijakan Moneter (Fed, ECB)
+### Inflasi & Dolar AS (DXY)
+### Permintaan Fisik (China, India, Bank Sentral)
+
+## 4. ANALISIS TEKNIKAL
+### Tren & Support/Resistance
+- Support 1: $...
+- Support 2: $...
+- Resistance 1: $...
+- Resistance 2: $...
+
+## 5. ANALISIS SENTIMEN BERITA
+[Kategorikan dampak per faktor: Bullish / Bearish / Neutral]
+
+## 6. RISIKO UTAMA
+[3-5 faktor yang bisa membalikkan prediksi]
+
+## 7. KESIMPULAN
+[Paragraf penutup ringkas]
+
+---
+⚠️ DISCLAIMER: Analisis ini bukan saran investasi resmi.
+"""
+
+
+def run_gemini(model, prompt: str) -> str:
     try:
         response = model.generate_content(
             prompt,
@@ -602,26 +843,45 @@ with st.sidebar:
     )
 
     st.divider()
-    st.subheader("📊 Pilih Saham")
-    stocks = get_indonesian_stocks()
 
-    selected_stock_name = st.selectbox(
-        "Saham Populer", options=list(stocks.keys()), index=0
+    # ── Mode Selector ──
+    mode = st.radio(
+        "🎯 Mode Analisis",
+        ["📈 Saham IDX", "🥇 Emas"],
+        horizontal=True,
     )
-
-    custom_ticker = st.text_input(
-        "Atau kode manual (tanpa .JK)",
-        placeholder="Contoh: ACES, SIDO",
-    )
-
-    if custom_ticker:
-        ticker = f"{custom_ticker.upper().strip()}.JK"
-        stock_display_name = custom_ticker.upper().strip()
-    else:
-        ticker = stocks[selected_stock_name]
-        stock_display_name = selected_stock_name
 
     st.divider()
+
+    if mode == "📈 Saham IDX":
+        st.subheader("📊 Pilih Saham")
+        stocks = get_indonesian_stocks()
+        selected_stock_name = st.selectbox(
+            "Saham Populer", options=list(stocks.keys()), index=0
+        )
+        custom_ticker = st.text_input(
+            "Atau kode manual (tanpa .JK)",
+            placeholder="Contoh: ACES, SIDO",
+        )
+        if custom_ticker:
+            ticker = f"{custom_ticker.upper().strip()}.JK"
+            stock_display_name = custom_ticker.upper().strip()
+        else:
+            ticker = stocks[selected_stock_name]
+            stock_display_name = selected_stock_name
+
+    else:  # Mode Emas
+        st.subheader("🥇 Pengaturan Emas")
+        gold_source = st.radio(
+            "Sumber Harga",
+            ["COMEX Futures (GC=F)", "XAU/USD Spot"],
+            horizontal=False,
+        )
+        ticker = "GC=F" if "COMEX" in gold_source else "XAUUSD=X"
+        stock_display_name = "Gold (Emas)"
+
+    st.divider()
+
     st.subheader("📅 Periode Data")
     period = st.select_slider(
         "Periode Historis",
@@ -630,14 +890,19 @@ with st.sidebar:
     )
 
     st.divider()
+
     st.subheader("🔧 Opsi Analisis")
     include_news = st.checkbox("📰 Sertakan Berita", value=True)
     include_macro = st.checkbox("🌐 Berita Makro", value=True)
-    include_fundamental = st.checkbox("🏢 Data Fundamental", value=True)
+    if mode == "📈 Saham IDX":
+        include_fundamental = st.checkbox("🏢 Data Fundamental", value=True)
+    else:
+        include_fundamental = False
 
     st.divider()
-    analyze_btn = st.button("🚀 Analisis Sekarang", type="primary",
-                            use_container_width=True)
+    analyze_btn = st.button(
+        "🚀 Analisis Sekarang", type="primary", use_container_width=True
+    )
     st.divider()
     st.caption("⚠️ Bukan saran investasi resmi")
 
@@ -656,7 +921,7 @@ if not api_key:
     4. Copy & paste di sidebar kiri
 
     Atau set di Streamlit Secrets:
-    ```
+    ```toml
     GEMINI_API_KEY = "your_key_here"
     ```
     """)
@@ -668,15 +933,24 @@ if not api_key:
 # ══════════════════════════════════════════════════════════════════════════════
 
 try:
-    with st.spinner(f"⏳ Memuat data {ticker}..."):
-        df = fetch_stock_data(ticker, period)
-        if df is None or df.empty:
-            st.error(f"❌ Data tidak ditemukan untuk **{ticker}**. "
-                     "Pastikan kode saham benar.")
-            st.stop()
-        df = calculate_all_indicators(df)
+    with st.spinner(f"⏳ Memuat data {stock_display_name}..."):
+        if mode == "🥇 Emas":
+            df_raw, corr_data = fetch_gold_data(period)
+            if df_raw is None or df_raw.empty:
+                st.error("❌ Gagal memuat data emas.")
+                st.stop()
+            df = calculate_gold_indicators(df_raw, corr_data)
+        else:
+            df = fetch_stock_data(ticker, period)
+            if df is None or df.empty:
+                st.error(f"❌ Data tidak ditemukan untuk **{ticker}**.")
+                st.stop()
+            df = calculate_all_indicators(df)
+            corr_data = {}
+
         current_price = get_current_price(ticker)
         indicator_summary = get_indicator_summary(df)
+
 except Exception as e:
     st.error(f"❌ Error memuat data: {str(e)}")
     st.stop()
@@ -690,16 +964,25 @@ price = current_price["current_price"]
 change = current_price["change"]
 change_pct = current_price["change_pct"]
 
+# Label mata uang
+currency_label = "$" if mode == "🥇 Emas" else "Rp"
+price_str = (f"${price:,.2f}" if mode == "🥇 Emas" else f"Rp {price:,.0f}")
+
 col1, col2, col3, col4, col5 = st.columns(5)
 
 with col1:
     delta_color = "normal" if change >= 0 else "inverse"
-    st.metric("💰 Harga", f"Rp {price:,.0f}",
-              f"{change:+.0f} ({change_pct:+.2f}%)", delta_color=delta_color)
+    st.metric(
+        f"{'🥇' if mode == '🥇 Emas' else '💰'} Harga",
+        price_str,
+        f"{change:+.2f} ({change_pct:+.2f}%)",
+        delta_color=delta_color,
+    )
 
 with col2:
     rsi_val = df["RSI"].iloc[-1]
-    rsi_label = "🔴 Overbought" if rsi_val > 70 else "🟢 Oversold" if rsi_val < 30 else "🟡 Normal"
+    rsi_label = ("🔴 Overbought" if rsi_val > 70
+                 else "🟢 Oversold" if rsi_val < 30 else "🟡 Normal")
     st.metric("📊 RSI (14)", f"{rsi_val:.1f}", rsi_label)
 
 with col3:
@@ -711,7 +994,8 @@ with col3:
 with col4:
     vol_ratio = df["Volume_Ratio"].iloc[-1]
     st.metric("📦 Volume", f"{vol_ratio:.2f}x",
-              "🔥 Tinggi" if vol_ratio > 1.5 else "📉 Rendah" if vol_ratio < 0.5 else "Normal")
+              "🔥 Tinggi" if vol_ratio > 1.5
+              else "📉 Rendah" if vol_ratio < 0.5 else "Normal")
 
 with col5:
     overall = indicator_summary["_summary"]["overall"]
@@ -720,18 +1004,48 @@ with col5:
     emoji = "🟢" if overall == "BULLISH" else "🔴" if overall == "BEARISH" else "🟡"
     st.metric("🎯 Sinyal", f"{emoji} {overall}", f"Bull:{bull} Bear:{bear}")
 
+# Metric tambahan khusus emas
+if mode == "🥇 Emas":
+    latest = df.iloc[-1]
+    ec1, ec2, ec3, ec4 = st.columns(4)
+    with ec1:
+        dxy = latest.get("DXY", None)
+        st.metric("💵 DXY", f"{dxy:.2f}" if dxy and not np.isnan(dxy) else "N/A",
+                  help="US Dollar Index - korelasi negatif dengan emas")
+    with ec2:
+        vix = latest.get("VIX", None)
+        st.metric("😱 VIX", f"{vix:.2f}" if vix and not np.isnan(vix) else "N/A",
+                  help="Fear Index - tinggi = bullish emas")
+    with ec3:
+        us10y = latest.get("US10Y", None)
+        st.metric("📉 US10Y", f"{us10y:.2f}%" if us10y and not np.isnan(us10y) else "N/A",
+                  help="US 10Y Yield - tinggi = bearish emas")
+    with ec4:
+        gsr = latest.get("Gold_Silver_Ratio", None)
+        st.metric("⚖️ Gold/Silver", f"{gsr:.1f}" if gsr and not np.isnan(gsr) else "N/A",
+                  help="Rasio normal: 60-80")
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # TABS
 # ══════════════════════════════════════════════════════════════════════════════
 
-tab1, tab3, tab4, tab5 = st.tabs([
-    "📈 Chart & Teknikal",
-    # "🏢 Fundamental",
-    "📰 Berita",
-    "🤖 Analisis AI",
-    "📋 Sinyal",
-])
+if mode == "📈 Saham IDX":
+    tab1, tab2, tab3, tab4, tab5 = st.tabs([
+        "📈 Chart & Teknikal",
+        "🏢 Fundamental",
+        "📰 Berita",
+        "🤖 Analisis AI",
+        "📋 Sinyal",
+    ])
+else:
+    tab1, tab2, tab3, tab4, tab5 = st.tabs([
+        "📈 Chart & Teknikal",
+        "🌍 Korelasi Makro",
+        "📰 Berita",
+        "🤖 Analisis AI",
+        "📋 Sinyal",
+    ])
 
 
 # ─── TAB 1: CHART ─────────────────────────────────────────────────────────────
@@ -757,7 +1071,6 @@ with tab1:
                         else ["Harga", "MACD"]),
     )
 
-    # Price
     if chart_type == "Candlestick":
         fig.add_trace(go.Candlestick(
             x=df.index, open=df["Open"], high=df["High"],
@@ -786,7 +1099,6 @@ with tab1:
             fill="tonexty", fillcolor="rgba(100,200,255,0.05)",
             showlegend=False), row=1, col=1)
 
-    # MACD
     colors_macd = ["#00ff88" if v >= 0 else "#ff4444"
                    for v in df["MACD_Hist"].fillna(0)]
     fig.add_trace(go.Bar(x=df.index, y=df["MACD_Hist"], name="MACD Hist",
@@ -796,7 +1108,6 @@ with tab1:
     fig.add_trace(go.Scatter(x=df.index, y=df["MACD_Signal"], name="Signal",
         line=dict(color="#ff6b6b", width=1.5)), row=2, col=1)
 
-    # Volume
     if show_vol:
         vol_colors = ["#00ff88" if c >= o else "#ff4444"
                       for c, o in zip(df["Close"], df["Open"])]
@@ -834,58 +1145,120 @@ with tab1:
     st.plotly_chart(fig2, use_container_width=True)
 
 
-# ─── TAB 2: FUNDAMENTAL ───────────────────────────────────────────────────────
-# with tab2:
-#     st.subheader("🏢 Data Fundamental")
-#     if include_fundamental:
-#         with st.spinner("Memuat fundamental..."):
-#             fundamental = fetch_stock_info(ticker)
+# ─── TAB 2: FUNDAMENTAL / KORELASI MAKRO ──────────────────────────────────────
+with tab2:
+    if mode == "📈 Saham IDX":
+        st.subheader("🏢 Data Fundamental")
+        if include_fundamental:
+            with st.spinner("Memuat fundamental..."):
+                fundamental = fetch_stock_info(ticker)
 
-#         def show_val(v, is_pct=False):
-#             if v in ("N/A", None):
-#                 return "N/A"
-#             try:
-#                 fv = float(v)
-#                 if is_pct:
-#                     return f"{fv*100:.2f}%"
-#                 if fv > 1_000_000_000_000:
-#                     return f"Rp {fv/1_000_000_000_000:.2f}T"
-#                 return f"{fv:.2f}"
-#             except Exception:
-#                 return str(v)
+            def show_val(v, is_pct=False):
+                if v in ("N/A", None):
+                    return "N/A"
+                try:
+                    fv = float(v)
+                    if is_pct:
+                        return f"{fv*100:.2f}%"
+                    if fv > 1_000_000_000_000:
+                        return f"Rp {fv/1_000_000_000_000:.2f}T"
+                    return f"{fv:.2f}"
+                except Exception:
+                    return str(v)
 
-#         col_f1, col_f2 = st.columns(2)
-#         with col_f1:
-#             st.markdown("#### 📊 Valuasi")
-#             for k in ["P/E Ratio", "P/B Ratio", "EPS", "Market Cap", "Beta"]:
-#                 a, b = st.columns(2)
-#                 a.write(f"**{k}**")
-#                 b.write(show_val(fundamental.get(k)))
+            col_f1, col_f2 = st.columns(2)
+            with col_f1:
+                st.markdown("#### 📊 Valuasi")
+                for k in ["P/E Ratio", "P/B Ratio", "EPS", "Market Cap", "Beta"]:
+                    a, b = st.columns(2)
+                    a.write(f"**{k}**")
+                    b.write(show_val(fundamental.get(k)))
 
-#             st.markdown("#### 📈 Pertumbuhan")
-#             for k in ["Revenue Growth", "Earnings Growth",
-#                       "Profit Margin", "Operating Margin"]:
-#                 a, b = st.columns(2)
-#                 a.write(f"**{k}**")
-#                 b.write(show_val(fundamental.get(k), is_pct=True))
+                st.markdown("#### 📈 Pertumbuhan")
+                for k in ["Revenue Growth", "Earnings Growth",
+                          "Profit Margin", "Operating Margin"]:
+                    a, b = st.columns(2)
+                    a.write(f"**{k}**")
+                    b.write(show_val(fundamental.get(k), is_pct=True))
 
-#         with col_f2:
-#             st.markdown("#### 💪 Kesehatan Keuangan")
-#             for k, pct_flag in [("ROE", True), ("ROA", True),
-#                                  ("Debt to Equity", False),
-#                                  ("Current Ratio", False),
-#                                  ("Dividend Yield", True)]:
-#                 a, b = st.columns(2)
-#                 a.write(f"**{k}**")
-#                 b.write(show_val(fundamental.get(k), is_pct=pct_flag))
+            with col_f2:
+                st.markdown("#### 💪 Kesehatan Keuangan")
+                for k, pct_flag in [("ROE", True), ("ROA", True),
+                                     ("Debt to Equity", False),
+                                     ("Current Ratio", False),
+                                     ("Dividend Yield", True)]:
+                    a, b = st.columns(2)
+                    a.write(f"**{k}**")
+                    b.write(show_val(fundamental.get(k), is_pct=pct_flag))
 
-#             st.markdown("#### 📉 Range Harga")
-#             for k in ["52W High", "52W Low", "Avg Volume"]:
-#                 a, b = st.columns(2)
-#                 a.write(f"**{k}**")
-#                 b.write(show_val(fundamental.get(k)))
-#     else:
-#         st.info("Aktifkan 'Data Fundamental' di sidebar.")
+                st.markdown("#### 📉 Range Harga")
+                for k in ["52W High", "52W Low", "Avg Volume"]:
+                    a, b = st.columns(2)
+                    a.write(f"**{k}**")
+                    b.write(show_val(fundamental.get(k)))
+        else:
+            st.info("Aktifkan 'Data Fundamental' di sidebar.")
+
+    else:
+        # Mode Emas: Tampilkan korelasi makro
+        st.subheader("🌍 Korelasi Makro - Emas")
+
+        st.info("""
+        **Panduan Korelasi Emas:**
+        - 📉 **DXY naik** → Emas cenderung **turun** (korelasi negatif)
+        - 😱 **VIX naik** → Emas cenderung **naik** (safe haven)
+        - 📈 **US10Y naik** → Emas cenderung **turun** (opportunity cost)
+        - 🥈 **Silver** → Bergerak searah dengan emas
+        """)
+
+        # Chart korelasi
+        corr_keys = ["DXY", "VIX", "US10Y", "Silver"]
+        available = {k: v for k, v in corr_data.items()
+                     if v is not None and k in corr_keys}
+
+        if available:
+            fig_corr = make_subplots(
+                rows=len(available), cols=1,
+                shared_xaxes=True,
+                subplot_titles=list(available.keys()),
+                vertical_spacing=0.08,
+            )
+            colors_map = {
+                "DXY": "#ff6b6b",
+                "VIX": "#ffaa00",
+                "US10Y": "#00d4ff",
+                "Silver": "#c0c0c0",
+            }
+            for i, (name, series) in enumerate(available.items(), 1):
+                aligned = series.reindex(df.index, method="ffill")
+                fig_corr.add_trace(go.Scatter(
+                    x=aligned.index, y=aligned,
+                    name=name,
+                    line=dict(color=colors_map.get(name, "#ffffff"), width=1.5)
+                ), row=i, col=1)
+
+            fig_corr.update_layout(
+                template="plotly_dark",
+                height=150 * len(available),
+                showlegend=False,
+                margin=dict(l=0, r=0, t=30, b=0),
+            )
+            st.plotly_chart(fig_corr, use_container_width=True)
+        else:
+            st.warning("Data korelasi tidak tersedia.")
+
+        # Harga Antam
+        st.subheader("🏷️ Harga Emas Antam")
+        with st.spinner("Memuat harga Antam..."):
+            antam_prices = fetch_gold_antam()
+
+        if antam_prices and "error" not in antam_prices and "status" not in antam_prices:
+            antam_df = pd.DataFrame(
+                list(antam_prices.items()), columns=["Berat", "Harga"]
+            )
+            st.dataframe(antam_df, use_container_width=True, hide_index=True)
+        else:
+            st.warning(f"Harga Antam: {antam_prices}")
 
 
 # ─── TAB 3: BERITA ────────────────────────────────────────────────────────────
@@ -893,39 +1266,64 @@ with tab3:
     st.subheader("📰 Berita Terkini")
     if include_news:
         with st.spinner("Memuat berita..."):
-            news_articles = fetch_stock_news(stock_display_name, ticker)
-            market_articles = fetch_market_news() if include_macro else []
+            if mode == "🥇 Emas":
+                news_articles = fetch_gold_news()
+                market_articles = []
+            else:
+                news_articles = fetch_stock_news(stock_display_name, ticker)
+                market_articles = fetch_market_news() if include_macro else []
 
         col_n1, col_n2 = st.columns(2)
         with col_n1:
-            st.markdown(f"#### 📌 Berita {stock_display_name}")
+            label = "🥇 Berita Emas Global" if mode == "🥇 Emas" else f"📌 Berita {stock_display_name}"
+            st.markdown(f"#### {label}")
             if news_articles:
                 for art in news_articles:
                     title = art["title"]
-                    label = (f"{title[:75]}..." if len(title) > 75 else title)
-                    with st.expander(f"{'🔴' if art.get('relevant') else '⚪'} {label}"):
+                    short = f"{title[:75]}..." if len(title) > 75 else title
+                    with st.expander(f"{'🔴' if art.get('relevant') else '⚪'} {short}"):
                         st.write(f"**Sumber:** {art['source']}")
                         st.write(f"**Tanggal:** {art['published']}")
                         st.write(art["summary"])
                         if art["link"]:
                             st.markdown(f"[🔗 Baca Selengkapnya]({art['link']})")
             else:
-                st.info("Tidak ada berita spesifik ditemukan.")
+                st.info("Tidak ada berita ditemukan.")
 
         with col_n2:
-            st.markdown("#### 🌐 Berita Makro")
-            if market_articles:
-                for art in market_articles:
-                    title = art["title"]
-                    label = (f"{title[:75]}..." if len(title) > 75 else title)
-                    with st.expander(label):
-                        st.write(f"**Sumber:** {art['source']}")
-                        st.write(f"**Tanggal:** {art['published']}")
-                        st.write(art["summary"])
-                        if art["link"]:
-                            st.markdown(f"[🔗 Baca Selengkapnya]({art['link']})")
+            if mode == "📈 Saham IDX":
+                st.markdown("#### 🌐 Berita Makro")
+                if market_articles:
+                    for art in market_articles:
+                        title = art["title"]
+                        short = f"{title[:75]}..." if len(title) > 75 else title
+                        with st.expander(short):
+                            st.write(f"**Sumber:** {art['source']}")
+                            st.write(f"**Tanggal:** {art['published']}")
+                            st.write(art["summary"])
+                            if art["link"]:
+                                st.markdown(f"[🔗 Baca Selengkapnya]({art['link']})")
+                else:
+                    st.info("Aktifkan 'Berita Makro' di sidebar.")
             else:
-                st.info("Aktifkan 'Berita Makro' di sidebar.")
+                st.markdown("#### 📊 Panduan Faktor Emas")
+                st.markdown("""
+                **🟢 Faktor Bullish Emas:**
+                - Ketegangan geopolitik / perang
+                - Inflasi tinggi (CPI naik)
+                - Fed dovish / potong suku bunga
+                - DXY melemah
+                - VIX tinggi (risk-off)
+                - Pembelian emas bank sentral
+
+                **🔴 Faktor Bearish Emas:**
+                - Ekonomi AS kuat
+                - Fed hawkish / naikkan suku bunga
+                - DXY menguat
+                - Risk-on sentiment
+                - US10Y yield naik
+                - Inflasi terkendali
+                """)
     else:
         st.info("Aktifkan 'Sertakan Berita' di sidebar.")
 
@@ -937,34 +1335,48 @@ with tab4:
     if "ai_analysis" not in st.session_state:
         st.session_state.ai_analysis = None
         st.session_state.analyzed_ticker = None
+        st.session_state.analyzed_mode = None
 
     if analyze_btn:
         with st.spinner("🤖 Gemini sedang menganalisis... (30-60 detik)"):
             try:
                 model = setup_gemini(api_key)
 
-                fund_data = fetch_stock_info(ticker) if include_fundamental else {}
-                stock_news = fetch_stock_news(stock_display_name, ticker) if include_news else []
-                macro_news = fetch_market_news() if include_macro else []
+                if mode == "🥇 Emas":
+                    gold_news = fetch_gold_news() if include_news else []
+                    antam_prices = fetch_gold_antam()
+                    prompt = build_gold_prompt(
+                        current_price=current_price,
+                        df=df,
+                        corr_data=corr_data,
+                        antam_prices=antam_prices,
+                        news_text=format_news_for_llm(gold_news),
+                    )
+                else:
+                    fund_data = fetch_stock_info(ticker) if include_fundamental else {}
+                    stock_news = fetch_stock_news(stock_display_name, ticker) if include_news else []
+                    macro_news = fetch_market_news() if include_macro else []
+                    prompt = build_stock_prompt(
+                        ticker=ticker,
+                        stock_name=stock_display_name,
+                        current_price=current_price,
+                        df=df,
+                        fundamental=fund_data,
+                        news_text=format_news_for_llm(stock_news),
+                        market_news=format_news_for_llm(macro_news),
+                    )
 
-                analysis = analyze_with_gemini(
-                    model=model,
-                    ticker=ticker,
-                    stock_name=stock_display_name,
-                    current_price=current_price,
-                    df=df,
-                    fundamental=fund_data,
-                    news_text=format_news_for_llm(stock_news),
-                    market_news=format_news_for_llm(macro_news),
-                )
+                analysis = run_gemini(model, prompt)
                 st.session_state.ai_analysis = analysis
                 st.session_state.analyzed_ticker = ticker
+                st.session_state.analyzed_mode = mode
 
             except Exception as e:
                 st.error(f"❌ Error: {str(e)}")
 
     if st.session_state.ai_analysis:
-        st.success(f"✅ Analisis selesai untuk **{stock_display_name}**")
+        label = "Emas" if st.session_state.analyzed_mode == "🥇 Emas" else stock_display_name
+        st.success(f"✅ Analisis selesai untuk **{label}**")
         st.markdown(st.session_state.ai_analysis)
         st.download_button(
             "📥 Download Analisis (TXT)",
@@ -973,21 +1385,18 @@ with tab4:
             mime="text/plain",
         )
     else:
-        st.info("""
+        icon = "🥇" if mode == "🥇 Emas" else "📈"
+        st.info(f"""
         👆 Klik **"🚀 Analisis Sekarang"** di sidebar untuk memulai.
 
-        **Yang dianalisis:**
-        - ✅ Harga real-time & performa historis
-        - ✅ 10+ indikator teknikal
-        - ✅ Data fundamental perusahaan  
-        - ✅ Berita terkini saham
-        - ✅ Kondisi makro ekonomi Indonesia
+        **Mode saat ini: {mode}**
 
-        **Output:**
-        - 🎯 Prediksi 7 & 30 hari ke depan
-        - 💡 Rekomendasi Buy/Hold/Sell
-        - 📊 Level Support & Resistance
-        - ⚠️ Analisis risiko lengkap
+        {"**Yang dianalisis:**" if mode == "📈 Saham IDX" else "**Yang dianalisis:**"}
+        - ✅ Harga real-time
+        - ✅ 10+ indikator teknikal
+        {"- ✅ Data fundamental perusahaan" if mode == "📈 Saham IDX" else "- ✅ DXY, VIX, US10Y, Gold/Silver Ratio"}
+        {"- ✅ Berita saham IDX" if mode == "📈 Saham IDX" else "- ✅ Berita geopolitik & makro global"}
+        {"- ✅ Makro ekonomi Indonesia" if mode == "📈 Saham IDX" else "- ✅ Harga emas Antam"}
         """)
 
 
@@ -1025,6 +1434,8 @@ with tab5:
     st.subheader("📊 Data Historis (20 Hari Terakhir)")
     cols_show = ["Open", "High", "Low", "Close", "Volume",
                  "RSI", "MACD", "SMA_20", "BB_Upper", "BB_Lower"]
+    # Filter kolom yang ada
+    cols_show = [c for c in cols_show if c in df.columns]
     hist_df = df[cols_show].tail(20).round(2).copy()
     hist_df.index = hist_df.index.strftime("%Y-%m-%d")
     st.dataframe(hist_df, use_container_width=True)
