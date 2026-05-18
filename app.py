@@ -725,9 +725,9 @@ with col5:
 # TABS
 # ══════════════════════════════════════════════════════════════════════════════
 
-tab1, tab2, tab3, tab4, tab5 = st.tabs([
+tab1, tab3, tab4, tab5 = st.tabs([
     "📈 Chart & Teknikal",
-    "🏢 Fundamental",
+    # "🏢 Fundamental",
     "📰 Berita",
     "🤖 Analisis AI",
     "📋 Sinyal",
